@@ -1,5 +1,7 @@
 import { createNovelRecoveryStore } from './recoveryStore.js';
 import { createNovelRunner } from './generation.js';
+import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
+import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
 
 let instance = null;
@@ -14,6 +16,9 @@ export function initNovelUI(host) {
         totalChapters: 1000,
         currentChapter: 0,
         prompt: '继续推进剧情，保证剧情流畅自然，注意人物性格一致性',
+        generationMode: 'novel',
+        roleNames: '',
+        roleBatch: null,
         isRunning: false,
         isPaused: false,
 
@@ -535,30 +540,52 @@ export function initNovelUI(host) {
             generationStats = stats;
         },
     });
+    const roleRunner = createRoleBatchRunner({
+        getSettings: () => settings,
+        host,
+        onChange: () => {
+            saveSettings();
+            updateUI();
+        },
+        notify: (type, message) => toastr[type](message),
+        onStats: (stats) => {
+            generationStats = stats;
+        },
+    });
+    const currentRunner = () => (settings.generationMode === 'role-batch' ? roleRunner : novelRunner);
+    const roleStatusRenderer = createListRenderer();
 
     function startGeneration() {
-        return novelRunner.start();
+        return currentRunner().start();
     }
     function pauseGeneration() {
-        novelRunner.pause();
+        currentRunner().pause();
         toastr.info('当前章节结束后暂停');
     }
     function resumeGeneration() {
-        novelRunner.resume();
+        currentRunner().resume();
         toastr.info('已恢复');
     }
     function stopGeneration() {
-        novelRunner.stop();
+        currentRunner().stop();
         toastr.warning('已停止自动续写；酒馆正在生成的回复可能仍会完成');
     }
 
-    function resetProgress() {
+    async function resetProgress() {
         if (settings.isRunning) {
             toastr.warning('请先停止');
             return;
         }
-        novelRunner.resetPending();
-        settings.currentChapter = 0;
+        if (settings.generationMode === 'role-batch') {
+            try {
+                await host.restoreRoleTemplate(settings.roleBatch);
+            } catch (error) {
+                toastr.warning(error.message);
+                return;
+            }
+        }
+        currentRunner().resetPending();
+        if (settings.generationMode !== 'role-batch') settings.currentChapter = 0;
         generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
         saveSettings();
         updateUI();
@@ -626,10 +653,31 @@ export function initNovelUI(host) {
     }
 
     function updateUI() {
-        const pct =
-            settings.totalChapters > 0 ? ((settings.currentChapter / settings.totalChapters) * 100).toFixed(1) : 0;
+        const batchMode = settings.generationMode === 'role-batch';
+        const batch = settings.roleBatch;
+        const roleNames = batch?.names || parseRoleNames(settings.roleNames).slice(0, settings.totalChapters);
+        const total = batchMode ? roleNames.length : settings.totalChapters;
+        const completed = batchMode ? batch?.index || 0 : settings.currentChapter;
+        const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
         $('#nag-progress-fill').css('width', `${pct}%`);
-        $('#nag-progress-text').text(`${settings.currentChapter} / ${settings.totalChapters} (${pct}%)`);
+        $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
+        $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', settings.isRunning);
+        $('#nag-set-minlen, #nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
+        $('#nag-total-label').text(batchMode ? '目标角色数' : '目标章节');
+        $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
+        $('#nag-role-results')
+            .toggle(batchMode)
+            .html(
+                batchMode
+                    ? roleNames
+                          .map((name, index) => {
+                              const item = batch?.items[index] || {};
+                              const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
+                              return `<div class="ttw-memory-item">${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}</div>`;
+                          })
+                          .join('')
+                    : '',
+            );
 
         const [txt, cls] = settings.isRunning
             ? settings.isPaused
@@ -648,7 +696,7 @@ export function initNovelUI(host) {
             const elapsed = Date.now() - generationStats.startTime;
             const avg = elapsed / generationStats.chaptersGenerated;
             $('#nag-time-elapsed').text(formatDuration(elapsed));
-            $('#nag-time-remaining').text(formatDuration(avg * (settings.totalChapters - settings.currentChapter)));
+            $('#nag-time-remaining').text(formatDuration(avg * (total - completed)));
         }
         $('#nag-stat-errors').text(generationStats.errors.length);
 
@@ -732,8 +780,10 @@ export function initNovelUI(host) {
                         </div>
                     </div>
                     <div class="nag-panel-content">
-                        <div class="nag-setting-item"><label>目标章节</label><input type="number" id="nag-set-total" min="1"></div>
-                        <div class="nag-setting-item"><label>提示词</label><textarea id="nag-set-prompt" rows="2"></textarea></div>
+                        <div class="nag-setting-item"><label>生成方式</label><select id="nag-set-mode"><option value="novel">原有自动续写</option><option value="role-batch">同楼层批量生成</option></select></div>
+                        <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
+                        <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
+                        <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
                 </div>
 
@@ -1111,14 +1161,23 @@ export function initNovelUI(host) {
         });
 
         // 生成控制
+        $('#nag-set-mode').on('change', function () {
+            if (settings.isRunning) return;
+            settings.generationMode = $(this).val() === 'role-batch' ? 'role-batch' : 'novel';
+            $('#nag-set-prompt').val(settings.generationMode === 'role-batch' ? settings.roleNames : settings.prompt);
+            saveSettings();
+            updateUI();
+        });
         $('#nag-set-total').on('change', function () {
             settings.totalChapters = +$(this).val() || 1000;
             saveSettings();
             updateUI();
         });
         $('#nag-set-prompt').on('change', function () {
-            settings.prompt = $(this).val();
+            if (settings.generationMode === 'role-batch') settings.roleNames = $(this).val();
+            else settings.prompt = $(this).val();
             saveSettings();
+            updateUI();
         });
         $('#nag-set-autosave').on('change', function () {
             settings.autoSaveInterval = +$(this).val() || 50;
@@ -1137,7 +1196,8 @@ export function initNovelUI(host) {
     function syncUI() {
         // 生成设置
         $('#nag-set-total').val(settings.totalChapters);
-        $('#nag-set-prompt').val(settings.prompt);
+        $('#nag-set-mode').val(settings.generationMode);
+        $('#nag-set-prompt').val(settings.generationMode === 'role-batch' ? settings.roleNames : settings.prompt);
 
         // 导出设置
         $('#nag-set-export-all').prop('checked', settings.exportAll);
@@ -1190,9 +1250,13 @@ export function initNovelUI(host) {
     });
 
     instance = {
-        stop: () => novelRunner.stop(),
+        stop: () => {
+            novelRunner.stop();
+            roleRunner.stop();
+        },
         dispose() {
             novelRunner.stop();
+            roleRunner.stop();
             clearInterval(refreshTimer);
             disposed = true;
             cleanupHelp?.();

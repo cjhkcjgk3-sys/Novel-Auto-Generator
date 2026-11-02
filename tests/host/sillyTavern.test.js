@@ -67,3 +67,114 @@ it('reports unavailable controls as definitely not dispatched', async () => {
     button.length = 0;
     await expect(host.send('继续', { assertCurrent: () => {} })).rejects.toMatchObject({ dispatched: false });
 });
+
+function batchSetup(existing = true) {
+    const { host, context } = setup();
+    context.updateMessageBlock = vi.fn();
+    context.saveChat = vi.fn(async () => {});
+    context.chat = [
+        { mes: '写卡助手', is_user: false },
+        { mes: '生成 [[角色名]]', is_user: true },
+    ];
+    if (existing)
+        context.chat.push({ mes: '旧成品', is_user: false, swipe_id: 0, swipes: ['旧成品'], extra: { note: '保留' } });
+    const inputs = [];
+    context.generate = vi.fn(async (type) => {
+        inputs.push({ type, history: structuredClone(type === 'swipe' ? context.chat.slice(0, -1) : context.chat) });
+        const prompt = context.chat[1].mes;
+        if (type === 'regenerate')
+            context.chat.push({ is_user: false, mes: prompt, swipe_id: 0, swipes: [prompt], extra: {} });
+        else {
+            const last = context.chat.at(-1);
+            last.swipes.length++;
+            last.mes = prompt;
+            last.swipes[last.swipe_id] = prompt;
+        }
+    });
+    return { host, context, inputs };
+}
+
+it('updates the original user floor and appends swipes while preserving all old pages', async () => {
+    const { host, context, inputs } = batchSetup();
+    const batch = host.prepareRoleBatch();
+    const options = { assertCurrent() {} };
+    expect(await host.generateRoleReply(batch, '生成 琴', options)).toMatchObject({ text: '生成 琴', swipe: 1 });
+    expect(await host.generateRoleReply(batch, '生成 安柏', options)).toMatchObject({ text: '生成 安柏', swipe: 2 });
+    expect(context.chat).toHaveLength(3);
+    expect(context.chat[1].mes).toBe('生成 安柏');
+    expect(context.chat[2].swipes).toEqual(['旧成品', '生成 琴', '生成 安柏']);
+    expect(context.chat[2].swipe_info[0].extra).toEqual({ note: '保留' });
+    expect(inputs[1].history.map((m) => m.mes)).toEqual(['写卡助手', '生成 安柏']);
+    expect(context.updateMessageBlock).toHaveBeenCalledWith(1, context.chat[1]);
+});
+
+it('creates the initial result floor without sending another user message', async () => {
+    const { host, context, inputs } = batchSetup(false);
+    const batch = host.prepareRoleBatch();
+    await host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} });
+    await host.generateRoleReply(batch, '生成 安柏', { assertCurrent() {} });
+    expect(inputs.map((call) => call.type)).toEqual(['regenerate', 'swipe']);
+    expect(batch.resultFloor).toBe(2);
+    expect(context.chat.filter((m) => m.is_user)).toHaveLength(1);
+    expect(context.chat[2].swipes).toEqual(['生成 琴', '生成 安柏']);
+});
+
+it('binds an empty newly created reply after failure so a retry can use the same floor', async () => {
+    const { host, context } = batchSetup(false);
+    const batch = host.prepareRoleBatch();
+    context.generate.mockImplementationOnce(async () => {
+        context.chat.push({ mes: '', is_user: false, swipe_id: 0, swipes: [''] });
+        throw new Error('network');
+    });
+    await expect(host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} })).rejects.toThrow('network');
+    expect(batch.resultFloor).toBe(2);
+    await host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} });
+    expect(context.chat).toHaveLength(3);
+    expect(context.chat[2].swipes).toEqual(['', '生成 琴']);
+});
+
+it('bounds a hanging host request, aborts it and reports uncertainty', async () => {
+    vi.useFakeTimers();
+    const { host, context } = batchSetup();
+    let signal;
+    context.generate.mockImplementation((_type, options) => {
+        signal = options.signal;
+        return new Promise(() => {});
+    });
+    const task = host
+        .generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {}, timeoutMs: 50 })
+        .catch((error) => error);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await task).toMatchObject({ uncertain: true });
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+});
+
+it('rejects changed chats before updating text and marks only explicit truncation', async () => {
+    const { host, context } = batchSetup();
+    const batch = host.prepareRoleBatch();
+    await expect(
+        host.generateRoleReply(batch, '不能写入', {
+            assertCurrent() {
+                throw new Error('switched');
+            },
+        }),
+    ).rejects.toThrow('switched');
+    expect(context.chat[1].mes).toBe('生成 [[角色名]]');
+    context.generate.mockRejectedValueOnce(Object.assign(new Error('limit'), { code: 'TOKEN_LIMIT' }));
+    expect(await host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} })).toMatchObject({ truncated: true });
+});
+
+it('restores the placeholder on explicit reset without deleting generated pages', async () => {
+    const { host, context } = batchSetup();
+    const batch = { ...host.prepareRoleBatch(), identity: host.snapshot().identity };
+    await host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} });
+    const pages = [...context.chat[2].swipes];
+    await host.restoreRoleTemplate(batch);
+    expect(context.chat[1].mes).toBe('生成 [[角色名]]');
+    expect(context.chat[2].swipes).toEqual(pages);
+    context.chatId = 'other';
+    context.chat[1].mes = '另一聊天';
+    await host.restoreRoleTemplate(batch);
+    expect(context.chat[1].mes).toBe('另一聊天');
+});
