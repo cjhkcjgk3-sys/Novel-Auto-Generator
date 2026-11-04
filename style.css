@@ -731,3 +731,8 @@
         gap: 0;
     }
 }
+.nag-result-plain {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: inherit;
+}

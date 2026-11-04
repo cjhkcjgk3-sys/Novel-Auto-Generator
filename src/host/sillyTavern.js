@@ -1,4 +1,6 @@
 import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
+import { createRoleResultIsolation } from './resultIsolation.js';
+import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
 
 export function getSillyTavernContext() {
     return globalThis.SillyTavern?.getContext?.() ?? globalThis.getContext?.() ?? null;
@@ -16,6 +18,7 @@ export function createSillyTavernHost({
     swipeReply = null,
 } = {}) {
     let roleGeneration = null;
+    let roleIsolation = null;
     function getChat() {
         try {
             const chat = getContext()?.chat;
@@ -95,6 +98,7 @@ export function createSillyTavernHost({
         if (roleGeneration || snapshot().generating === true) throw new Error('酒馆仍在处理上一轮，请稍后继续');
         if (snapshot().identity !== batch.identity) throw new Error('请返回原聊天后继续任务');
         const messages = getChat();
+        await roleIsolation?.verify();
         if (!messages?.[batch.promptFloor]?.is_user) throw new Error('任务对应的用户楼层已变化，请先恢复原聊天');
         if (messages.length === batch.promptFloor + 1) batch.resultFloor = null;
         else if (batch.resultFloor == null && messages.length === batch.promptFloor + 2 && !messages.at(-1)?.is_user)
@@ -160,6 +164,8 @@ export function createSillyTavernHost({
 
     async function generateRoleReply(batch, text, { signal, assertCurrent, timeoutMs = 600000 }) {
         assertCurrent();
+        await roleIsolation?.prepare();
+        assertCurrent();
         const identity = snapshot().identity;
         const context = getContext(),
             messages = getChat();
@@ -182,7 +188,7 @@ export function createSillyTavernHost({
         const previousReply = reply ? structuredClone(reply) : null;
         const expectedSwipe = reply ? Math.max(1, reply.swipes?.length || 0) : 0;
         const operation = batch.id && batch.dispatch ? { taskId: batch.id, ...batch.dispatch } : null;
-        function markReceipt(status) {
+        function markReceipt(status, textHash) {
             if (!operation || snapshot().identity !== identity || signal?.aborted) return;
             const message = messages[batch.resultFloor ?? batch.promptFloor + 1];
             if (!message || message.is_user || (message.swipe_id ?? 0) !== expectedSwipe) return;
@@ -193,6 +199,13 @@ export function createSillyTavernHost({
             message.swipe_info[expectedSwipe] ??= {};
             message.swipe_info[expectedSwipe].extra ??= {};
             message.swipe_info[expectedSwipe].extra.nag_role_batch = receipt;
+            if (textHash) {
+                message.extra[RESULT_HASH_KEY] = textHash;
+                message.swipe_info[expectedSwipe].extra[RESULT_HASH_KEY] = textHash;
+            } else if (status === 'pending') {
+                delete message.extra[RESULT_HASH_KEY];
+                delete message.swipe_info[expectedSwipe].extra[RESULT_HASH_KEY];
+            }
         }
         async function discardEmptyReply() {
             if (!previousReply) return;
@@ -250,12 +263,12 @@ export function createSillyTavernHost({
             }
         };
         const receivedEvent = context.eventTypes?.MESSAGE_RECEIVED;
-        const onReceived = (floor) => {
+        const onReceived = async (floor) => {
             if (failure || floor !== (batch.resultFloor ?? batch.promptFloor + 1)) return;
             const processor = getContext()?.streamingProcessor;
-            const text = messages[floor]?.mes?.trim();
-            if (text && text !== '...' && (!processor || (processor.isFinished && !processor.isStopped)))
-                markReceipt('complete');
+            const text = String(messages[floor]?.mes || '');
+            if (text.trim() && text.trim() !== '...' && (!processor || (processor.isFinished && !processor.isStopped)))
+                markReceipt('complete', roleIsolation?.active() ? await hashRoleResult(text) : undefined);
         };
         if (stopEvent) context.eventSource?.on(stopEvent, onUserStop);
         if (startEvent) context.eventSource?.on(startEvent, onStarted);
@@ -302,6 +315,7 @@ export function createSillyTavernHost({
                     actualSwipe: reply.swipe_id,
                 });
             // Core streaming failures can resolve normally and leave the initial "..." in chat.
+            await roleIsolation?.verify();
             const text = String(reply.mes || '');
             if (!text.trim() || text.trim() === '...') {
                 const notice = getDocument().querySelector('#toast-container .toast-error .toast-message')?.textContent;
@@ -316,7 +330,10 @@ export function createSillyTavernHost({
             }
             const processor = getContext()?.streamingProcessor;
             const isStreamInterrupted = Boolean(processor && (!processor.isFinished || processor.isStopped));
-            markReceipt(isStreamInterrupted ? 'partial' : 'complete');
+            markReceipt(
+                isStreamInterrupted ? 'partial' : 'complete',
+                roleIsolation?.active() ? await hashRoleResult(text) : undefined,
+            );
             await context.saveChat();
             return { text, swipe: reply.swipe_id, truncated: isStreamInterrupted };
         } catch (error) {
@@ -348,6 +365,22 @@ export function createSillyTavernHost({
     }
     return {
         getChat,
+        async restoreLegacyVisibility() {
+            let changed = false;
+            for (const message of getChat() || []) {
+                if (message?._nag_hidden) {
+                    delete message.is_hidden;
+                    delete message._nag_hidden;
+                    changed = true;
+                }
+            }
+            if (changed) await getContext().saveChat();
+        },
+        createRoleResultIsolation(options) {
+            roleIsolation?.dispose();
+            roleIsolation = createRoleResultIsolation({ getContext, getChat, snapshot, getDocument, ...options });
+            return roleIsolation;
+        },
         snapshot,
         send,
         prepareRoleBatch,

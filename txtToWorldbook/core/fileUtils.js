@@ -1,8 +1,8 @@
 export function createFileUtils(deps = {}) {
-    const { onHashFallback } = deps;
+    const { onHashFallback, fullContent = false } = deps;
 
     async function calculateFileHash(content) {
-        if (window.crypto && window.crypto.subtle) {
+        if (globalThis.crypto?.subtle) {
             try {
                 const encoder = new TextEncoder();
                 const data = encoder.encode(content);
@@ -18,7 +18,7 @@ export function createFileUtils(deps = {}) {
         const len = content.length;
         if (len === 0) return 'hash-empty';
         const sample =
-            len < 100000
+            fullContent || len < 100000
                 ? content
                 : content.slice(0, 1000) +
                   content.slice(Math.floor(len / 2), Math.floor(len / 2) + 1000) +

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
+import { runRoleIsolationChecks } from './role-isolation-checks.mjs';
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const url = process.env.ST_TEST_URL || 'http://127.0.0.1:18019';
@@ -41,6 +42,7 @@ try {
     let streamError = false;
     let holdResponse = false;
     let holdRole = null;
+    let frontendReply = false;
     let releaseResponse;
     let onHeld;
     const errors = [];
@@ -106,9 +108,13 @@ try {
                 body: `data: ${JSON.stringify({ error: { message: 'Synthetic stream failure before first token' } })}\n\n`,
             });
         }
-        const text = emptyReplies
-            ? ''
-            : `[start]\n<character_design_complex>\nname: 测试角色${requests.length}\nversion: 1\nnotes: ROLE_RESULT_${requests.length}\n</character_design_complex>\n[end]`;
+        const text = frontendReply
+            ? '```html\n<html><body>GENERATED_FRONTEND<script>window.parent.__nagResultRuns=(window.parent.__nagResultRuns||0)+1;</script>' +
+              '角色原文'.repeat(50) +
+              '</body></html>\n```'
+            : emptyReplies
+              ? ''
+              : `[start]\n<character_design_complex>\nname: 测试角色${requests.length}\nversion: 1\nnotes: ROLE_RESULT_${requests.length}\n</character_design_complex>\n[end]`;
         if (!body.stream)
             return route.fulfill({ json: { choices: [{ message: { content: text }, finish_reason: 'stop' }] } });
         return route.fulfill({
@@ -196,12 +202,18 @@ try {
             });
             throw error;
         });
-    const index = await page.evaluate(
-        (avatar) => SillyTavern.getContext().characters.findIndex((c) => c.avatar === avatar),
-        avatar,
-    );
-    assert.ok(index >= 0, 'Imported writing assistant is available');
+    const showFixture = async () => {
+        const index = await page.evaluate(
+            (avatar) => SillyTavern.getContext().characters.findIndex((c) => c.avatar === avatar),
+            avatar,
+        );
+        assert.ok(index >= 0, 'Imported writing assistant is available');
+        await page.evaluate((name) => window.jQuery('#character_search_bar').val(name).trigger('input'), name);
+        await page.locator('#CharID' + index).waitFor({ state: 'attached' });
+        return index;
+    };
     const reopenChat = async () => {
+        const index = await showFixture();
         await page.evaluate(async (index) => {
             const c = window.SillyTavern.getContext();
             await new Promise((resolve, reject) => {
@@ -218,12 +230,16 @@ try {
                 document.getElementById('CharID' + index).click();
             });
         }, index);
-        await page.waitForFunction((index) => {
+        await page.waitForFunction((avatar) => {
             const c = window.SillyTavern.getContext();
-            return Number(c.characterId) === index && c.chat.length === 3 && c.chat[1]?.mes.includes('小助手生成角色');
-        }, index);
+            return (
+                c.characters[c.characterId]?.avatar === avatar &&
+                c.chat.length === 3 &&
+                c.chat[1]?.mes.includes('小助手生成角色')
+            );
+        }, avatar);
     };
-    await page.locator('#CharID' + index).dispatchEvent('click');
+    await page.locator('#CharID' + (await showFixture())).dispatchEvent('click');
     await page.waitForFunction(() => SillyTavern.getContext().chat.length > 0);
     await page
         .waitForFunction(() => document.getElementById('nag-set-mode'))
@@ -262,6 +278,14 @@ try {
             const node = document.getElementById(id);
             node.value = value;
             node.dispatchEvent(new Event('change'));
+        }
+    });
+    // Each run starts with ordinary rendering; the isolation matrix enables its own switch.
+    await page.evaluate(async () => {
+        const toggle = window.jQuery('#nag-set-isolate-result');
+        if (toggle.prop('checked')) {
+            toggle.prop('checked', false);
+            await toggle.triggerHandler('change');
         }
     });
     await restartBatch();
@@ -312,6 +336,21 @@ try {
         assert.ok(!prompt.includes('ROLE_RESULT_'));
         assert.ok(result.replies[i].includes(`ROLE_RESULT_${i + 1}`));
     });
+    if (process.env.SMOKE_ISOLATION_ONLY === '1') {
+        const isolation = await runRoleIsolationChecks({
+            page,
+            requests,
+            reopenChat,
+            connect,
+            restartBatch,
+            setFrontendReply: (value) => {
+                frontendReply = value;
+            },
+        });
+        console.log(JSON.stringify({ passed: true, host: 'SillyTavern', isolation, requests: requests.length }));
+        await browser.close();
+        process.exit(0);
+    }
     emptyReplies = true;
     await restartBatch();
     await page.evaluate(() => {
@@ -377,7 +416,7 @@ try {
     const download = await downloaded;
     const downloadedLog = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
     assert.equal(downloadedLog.errors.length, 6);
-    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.5');
+    assert.equal(downloadedLog.pluginVersion, '1.9.4');
     streamError = false;
     await restartBatch();
     holdResponse = true;
@@ -587,6 +626,19 @@ try {
     await startAndWait();
     assert.equal(requests.length, 19, 'Only an explicit confirmed restart regenerates all roles');
     assert.deepEqual(errors, []);
+    const isolation =
+        process.env.SMOKE_ISOLATION === '1'
+            ? await runRoleIsolationChecks({
+                  page,
+                  requests,
+                  reopenChat,
+                  connect,
+                  restartBatch,
+                  setFrontendReply: (value) => {
+                      frontendReply = value;
+                  },
+              })
+            : null;
     console.log(
         JSON.stringify({
             passed: true,
@@ -604,6 +656,7 @@ try {
             reloadResume: true,
             staleProgressReconciled: true,
             editedNamesPreserveCompleted: true,
+            isolation,
             model: 'intercepted synthetic responses; no paid model calls',
         }),
     );
