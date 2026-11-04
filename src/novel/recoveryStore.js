@@ -35,3 +35,37 @@ export function createNovelRecoveryStore(getStorage, key = 'novel-auto-generator
         },
     };
 }
+
+/** Same synchronous journal, with the existing roleBatch record as its payload. */
+/** @param {() => Storage} getStorage @param {string} key */
+export function createRoleBatchRecoveryStore(getStorage, key = 'novel-auto-generator:role-batch:v1') {
+    return {
+        read() {
+            const raw = getStorage().getItem(key);
+            if (raw == null) return null;
+            const record = JSON.parse(raw);
+            if (record?.schemaVersion !== 1 || typeof record.updatedAt !== 'number')
+                throw new Error('批量任务恢复记录无效，请查看错误日志');
+            if (record.cleared === true) return record;
+            if (
+                typeof record.id !== 'string' ||
+                typeof record.identity !== 'string' ||
+                typeof record.template !== 'string' ||
+                !Array.isArray(record.names) ||
+                !record.names.every(/** @param {unknown} name */ (name) => typeof name === 'string') ||
+                !Array.isArray(record.items) ||
+                !Number.isInteger(record.promptFloor) ||
+                record.promptFloor < 0
+            )
+                throw new Error('批量任务恢复记录不完整，请查看错误日志');
+            return record;
+        },
+        /** @param {Record<string, any>} batch */
+        write(batch) {
+            getStorage().setItem(key, JSON.stringify(batch));
+        },
+        clear() {
+            getStorage().setItem(key, JSON.stringify({ schemaVersion: 1, cleared: true, updatedAt: Date.now() }));
+        },
+    };
+}

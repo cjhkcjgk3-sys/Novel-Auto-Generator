@@ -33,6 +33,7 @@ export function createSillyTavernHost({
         const stop = document.querySelector('#mes_stop');
         return {
             identity,
+            connected: context?.onlineStatus == null ? null : context.onlineStatus !== 'no_connection',
             messages: (chat || []).filter(Boolean).map((message) => ({
                 isUser: Boolean(message.is_user || message.is_human),
                 isSystem: Boolean(message.is_system),
@@ -82,6 +83,7 @@ export function createSillyTavernHost({
         const context = getContext(),
             prompt = getChat()?.[batch.promptFloor];
         if (!prompt?.is_user) return;
+        if (prompt.mes.includes('[[角色名]]') && prompt.mes !== batch.template) return;
         prompt.mes = batch.template;
         if (Array.isArray(prompt.swipes)) prompt.swipes[prompt.swipe_id ?? 0] = batch.template;
         delete prompt.extra?.display_text;
@@ -89,11 +91,83 @@ export function createSillyTavernHost({
         await context.saveChat();
     }
 
+    async function reconcileRoleBatch(batch) {
+        if (roleGeneration || snapshot().generating === true) throw new Error('酒馆仍在处理上一轮，请稍后继续');
+        if (snapshot().identity !== batch.identity) throw new Error('请返回原聊天后继续任务');
+        const messages = getChat();
+        if (!messages?.[batch.promptFloor]?.is_user) throw new Error('任务对应的用户楼层已变化，请先恢复原聊天');
+        if (messages.length === batch.promptFloor + 1) batch.resultFloor = null;
+        else if (batch.resultFloor == null && messages.length === batch.promptFloor + 2 && !messages.at(-1)?.is_user)
+            batch.resultFloor = batch.promptFloor + 1;
+        const reply = batch.resultFloor == null ? null : messages[batch.resultFloor];
+        if (
+            messages.length !== (batch.resultFloor == null ? batch.promptFloor + 1 : batch.resultFloor + 1) ||
+            reply?.is_user ||
+            reply?.is_system
+        )
+            throw new Error('任务对应的回复楼层已变化，请先核对聊天');
+        const swipes = reply?.swipes || (reply ? [reply.mes] : []);
+        let changed = false;
+        const updates = [];
+        for (const item of [...batch.items, ...(batch.history || [])]) {
+            let index = swipes.findIndex((text, swipe) => {
+                const receipt = reply.swipe_info?.[swipe]?.extra?.nag_role_batch;
+                return (
+                    receipt?.taskId === batch.id &&
+                    receipt.itemId === item.id &&
+                    receipt.status === 'complete' &&
+                    !!text?.trim() &&
+                    text.trim() !== '...'
+                );
+            });
+            if (
+                index < 0 &&
+                item.legacy &&
+                item.processed &&
+                !item.failed &&
+                Number.isInteger(item.swipe) &&
+                swipes[item.swipe]?.trim()
+            ) {
+                index = item.swipe;
+                reply.swipe_info ??= [];
+                reply.swipe_info[index] ??= {};
+                reply.swipe_info[index].extra ??= {};
+                const receipt = { taskId: batch.id, itemId: item.id, status: 'complete' };
+                reply.swipe_info[index].extra.nag_role_batch = receipt;
+                if ((reply.swipe_id ?? 0) === index) {
+                    reply.extra ??= {};
+                    reply.extra.nag_role_batch = receipt;
+                }
+                changed = true;
+            }
+            if (index >= 0) {
+                if (!item.processed || item.failed || item.legacy) changed = true;
+                updates.push([
+                    item,
+                    { processing: false, processed: true, failed: false, swipe: index, legacy: false },
+                ]);
+            } else
+                updates.push([
+                    item,
+                    { processing: false, ...(item.processed && !item.failed ? { processed: false, swipe: null } : {}) },
+                ]);
+        }
+        if (changed) await getContext().saveChat();
+        for (const [item, update] of updates) Object.assign(item, update);
+        batch.pending = false;
+        batch.dispatch = null;
+    }
+
     async function generateRoleReply(batch, text, { signal, assertCurrent, timeoutMs = 600000 }) {
         assertCurrent();
         const identity = snapshot().identity;
         const context = getContext(),
             messages = getChat();
+        if (context?.onlineStatus === 'no_connection')
+            throw Object.assign(new Error('酒馆 API 尚未连接，请连接后继续任务'), {
+                code: 'NOT_CONNECTED',
+                phase: 'dispatch',
+            });
         const prompt = messages?.[batch.promptFloor];
         const expectedLength = batch.resultFloor == null ? batch.promptFloor + 1 : batch.resultFloor + 1;
         if (roleGeneration || !prompt?.is_user || messages.length !== expectedLength || snapshot().generating === true)
@@ -107,6 +181,19 @@ export function createSillyTavernHost({
         let reply = batch.resultFloor == null ? null : messages[batch.resultFloor];
         const previousReply = reply ? structuredClone(reply) : null;
         const expectedSwipe = reply ? Math.max(1, reply.swipes?.length || 0) : 0;
+        const operation = batch.id && batch.dispatch ? { taskId: batch.id, ...batch.dispatch } : null;
+        function markReceipt(status) {
+            if (!operation || snapshot().identity !== identity || signal?.aborted) return;
+            const message = messages[batch.resultFloor ?? batch.promptFloor + 1];
+            if (!message || message.is_user || (message.swipe_id ?? 0) !== expectedSwipe) return;
+            const receipt = { ...operation, status };
+            message.extra ??= {};
+            message.extra.nag_role_batch = receipt;
+            message.swipe_info ??= [];
+            message.swipe_info[expectedSwipe] ??= {};
+            message.swipe_info[expectedSwipe].extra ??= {};
+            message.swipe_info[expectedSwipe].extra.nag_role_batch = receipt;
+        }
         async function discardEmptyReply() {
             if (!previousReply) return;
             for (const key of Object.keys(reply)) delete reply[key];
@@ -157,10 +244,22 @@ export function createSillyTavernHost({
         const startEvent = context.eventTypes?.GENERATION_STARTED;
         let started = !startEvent;
         const onStarted = (type) => {
-            if (type === (reply ? 'swipe' : 'regenerate')) started = true;
+            if (type === (reply ? 'swipe' : 'regenerate')) {
+                started = true;
+                markReceipt('pending');
+            }
+        };
+        const receivedEvent = context.eventTypes?.MESSAGE_RECEIVED;
+        const onReceived = (floor) => {
+            if (failure || floor !== (batch.resultFloor ?? batch.promptFloor + 1)) return;
+            const processor = getContext()?.streamingProcessor;
+            const text = messages[floor]?.mes?.trim();
+            if (text && text !== '...' && (!processor || (processor.isFinished && !processor.isStopped)))
+                markReceipt('complete');
         };
         if (stopEvent) context.eventSource?.on(stopEvent, onUserStop);
         if (startEvent) context.eventSource?.on(startEvent, onStarted);
+        if (receivedEvent) context.eventSource?.on(receivedEvent, onReceived);
         try {
             // regenerate on a user tail neither adds a user message nor consumes the input draft.
             // swipe excludes the result floor while retaining presets, card fields and worldbook rules.
@@ -215,6 +314,7 @@ export function createSillyTavernHost({
                 await discardEmptyReply();
                 return { text: '', swipe: null, truncated: false, error };
             }
+            markReceipt(getContext()?.streamingProcessor?.isStopped ? 'partial' : 'complete');
             await context.saveChat();
             return { text, swipe: reply.swipe_id, truncated: !!getContext()?.streamingProcessor?.isStopped };
         } catch (error) {
@@ -239,6 +339,7 @@ export function createSillyTavernHost({
             signal?.removeEventListener('abort', abort);
             if (stopEvent) context.eventSource?.removeListener(stopEvent, onUserStop);
             if (startEvent) context.eventSource?.removeListener(startEvent, onStarted);
+            if (receivedEvent) context.eventSource?.removeListener(receivedEvent, onReceived);
             // Let core finish its swipe cleanup before reset can dispatch another generation.
             if (roleGeneration) await Promise.race([roleGeneration.catch(() => {}), abortableDelay(1000)]);
         }
@@ -250,6 +351,13 @@ export function createSillyTavernHost({
         prepareRoleBatch,
         generateRoleReply,
         restoreRoleTemplate,
+        reconcileRoleBatch,
+        async confirmRoleRestart() {
+            return !!(await getContext().Popup.show.confirm(
+                '从头生成全部角色',
+                '将清除完成进度并从名单第一项重新生成；已有候选回复仍然保留。是否继续？',
+            ));
+        },
         readSettings(name) {
             return extensionSettings[name] || {};
         },

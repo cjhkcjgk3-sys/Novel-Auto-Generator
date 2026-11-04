@@ -1,4 +1,5 @@
-import { createNovelRecoveryStore } from './recoveryStore.js';
+import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
+import { roleComplete } from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
@@ -65,7 +66,7 @@ export function initNovelUI(host) {
     let settings = {};
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.1-role-batch.3';
+    const pluginVersion = '1.9.1-role-batch.4';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -561,6 +562,7 @@ export function initNovelUI(host) {
         },
     });
     const roleRunner = createRoleBatchRunner({
+        recovery: createRoleBatchRecoveryStore(() => localStorage),
         getSettings: () => settings,
         host,
         onError: recordError,
@@ -592,25 +594,36 @@ export function initNovelUI(host) {
         toastr.warning('已停止自动续写；酒馆正在生成的回复可能仍会完成');
     }
 
-    async function resetProgress() {
+    async function resetProgress({ restart = false } = {}) {
         if (settings.isRunning) {
             toastr.warning('请先停止');
             return;
         }
         if (settings.generationMode === 'role-batch') {
+            $(
+                '#nag-btn-start, #nag-btn-reset, #nag-btn-restart-role, #nag-set-mode, #nag-set-prompt, #nag-set-total',
+            ).prop('disabled', true);
             try {
-                await host.restoreRoleTemplate(settings.roleBatch);
+                await roleRunner.resetPending({ restart });
             } catch (error) {
+                recordError(error, { phase: 'reset-task' });
                 toastr.warning(error.message);
                 return;
+            } finally {
+                updateUI();
             }
-        }
-        currentRunner().resetPending();
+        } else currentRunner().resetPending();
         if (settings.generationMode !== 'role-batch') settings.currentChapter = 0;
         generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
         saveSettings();
         updateUI();
-        toastr.info('已重置');
+        toastr.info(
+            settings.generationMode === 'role-batch'
+                ? restart
+                    ? '已清除完成进度，点击开始从头生成；已有回复保留'
+                    : '已重置运行状态，完成记录已保留；点击开始继续'
+                : '已重置',
+        );
     }
 
     // ============================================
@@ -667,6 +680,13 @@ export function initNovelUI(host) {
         settings.panelCollapsed = Object.assign({}, defaultSettings.panelCollapsed, settings.panelCollapsed || {});
         settings.isRunning = false;
         settings.isPaused = false;
+        try {
+            roleRunner.restore();
+            saveSettings();
+        } catch (error) {
+            recordError(error, { phase: 'load-recovery' });
+            toastr.warning(error.message);
+        }
     }
 
     function saveSettings() {
@@ -678,7 +698,7 @@ export function initNovelUI(host) {
         const batch = settings.roleBatch;
         const roleNames = batch?.names || parseRoleNames(settings.roleNames).slice(0, settings.totalChapters);
         const total = batchMode ? roleNames.length : settings.totalChapters;
-        const completed = batchMode ? batch?.index || 0 : settings.currentChapter;
+        const completed = batchMode ? batch?.items?.filter(roleComplete).length || 0 : settings.currentChapter;
         const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
         $('#nag-progress-fill').css('width', `${pct}%`);
         $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
@@ -712,6 +732,9 @@ export function initNovelUI(host) {
         $('#nag-btn-resume').prop('disabled', !settings.isPaused);
         $('#nag-btn-stop').prop('disabled', !settings.isRunning);
         $('#nag-btn-reset').prop('disabled', settings.isRunning);
+        $('#nag-btn-start').text(batchMode ? '▶️ 开始／继续' : '▶️ 开始');
+        $('#nag-btn-reset').text(batchMode ? '🔄 重置（保留已完成）' : '🔄 重置');
+        $('#nag-btn-restart-role').toggle(batchMode).prop('disabled', settings.isRunning);
 
         if (settings.isRunning && generationStats.startTime && generationStats.chaptersGenerated > 0) {
             const elapsed = Date.now() - generationStats.startTime;
@@ -788,7 +811,7 @@ export function initNovelUI(host) {
                         <button id="nag-btn-resume" class="menu_button" disabled>⏯️ 恢复</button>
                         <button id="nag-btn-stop" class="menu_button" disabled>⏹️ 停止</button>
                     </div>
-                    <div class="nag-btn-row"><button id="nag-btn-reset" class="menu_button">🔄 重置</button></div>
+                    <div class="nag-btn-row"><button id="nag-btn-reset" class="menu_button">🔄 重置</button><button id="nag-btn-restart-role" class="menu_button" style="display:none">从头生成</button></div>
                     <div class="nag-btn-row"><button id="nag-btn-error-log" class="menu_button">下载错误日志</button><button id="nag-btn-clear-errors" class="menu_button">清空错误日志</button></div>
                 </div>
 
@@ -1025,6 +1048,15 @@ export function initNovelUI(host) {
         $('#nag-btn-resume').on('click', resumeGeneration);
         $('#nag-btn-stop').on('click', stopGeneration);
         $('#nag-btn-reset').on('click', resetProgress);
+        $('#nag-btn-restart-role').on('click', async () => {
+            if (settings.isRunning) return;
+            try {
+                if (await host.confirmRoleRestart()) await resetProgress({ restart: true });
+            } catch (error) {
+                recordError(error, { phase: 'restart-task' });
+                toastr.warning(error.message);
+            }
+        });
         $('#nag-btn-error-log').on('click', () => {
             const errors = settings.errorLog || [];
             if (!errors.length) return toastr.info('暂无错误日志');
@@ -1200,18 +1232,24 @@ export function initNovelUI(host) {
         $('#nag-set-mode').on('change', function () {
             if (settings.isRunning) return;
             settings.generationMode = $(this).val() === 'role-batch' ? 'role-batch' : 'novel';
+            if (settings.generationMode === 'role-batch' && settings.roleBatch?.inputLimit) {
+                settings.totalChapters = settings.roleBatch.inputLimit;
+                $('#nag-set-total').val(settings.totalChapters);
+            }
             $('#nag-set-prompt').val(settings.generationMode === 'role-batch' ? settings.roleNames : settings.prompt);
             saveSettings();
             updateUI();
         });
         $('#nag-set-total').on('change', function () {
             settings.totalChapters = +$(this).val() || 1000;
+            if (settings.generationMode === 'role-batch') roleRunner.saveInput();
             saveSettings();
             updateUI();
         });
         $('#nag-set-prompt').on('change', function () {
             if (settings.generationMode === 'role-batch') settings.roleNames = $(this).val();
             else settings.prompt = $(this).val();
+            if (settings.generationMode === 'role-batch') roleRunner.saveInput();
             saveSettings();
             updateUI();
         });
