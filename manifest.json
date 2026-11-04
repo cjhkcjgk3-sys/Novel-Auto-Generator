@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "AutoNovel",
-  "version": "1.9.1-role-batch.4",
+  "version": "1.9.1-role-batch.5",
   "description": "自动续写小说及同楼层批量写卡，支持断点续传"
 }
