@@ -66,7 +66,7 @@ export function initNovelUI(host) {
     let settings = {};
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.1-role-batch.4';
+    const pluginVersion = '1.9.1-role-batch.5';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];

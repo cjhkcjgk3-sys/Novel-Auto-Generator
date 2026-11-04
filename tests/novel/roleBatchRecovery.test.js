@@ -113,6 +113,8 @@ it('name edits retain completed occurrences, support reorder, removal and later 
     settings.roleNames = '琴\n安柏\n琴';
     settings.totalChapters = 3;
     runner.saveInput();
+    expect(settings.roleBatch.names).toEqual(['琴', '安柏', '琴']);
+    expect(settings.roleBatch.items.map((item) => !!item.processed)).toEqual([true, false, true]);
     await run(runner);
     expect(f.host.generateRoleReply.mock.calls.map((call) => call[1])).toEqual(['生成 琴', '生成 琴', '生成 安柏']);
     const batch = settings.roleBatch;
@@ -121,6 +123,33 @@ it('name edits retain completed occurrences, support reorder, removal and later 
     updateRoleNames(batch, ['琴', '琴', '安柏']);
     expect(batch.items.map((item) => item.id)).toEqual([ids[0], ids[2], ids[1]]);
     expect(batch.items.every((item) => item.processed)).toBe(true);
+});
+
+it('removes edited-out rows immediately, persists an empty list and retains completion on re-addition', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const { runner, settings } = f.create();
+    await run(runner);
+    const ids = settings.roleBatch.items.map((item) => item.id);
+    settings.roleBatch.items[1].failed = true;
+    settings.roleNames = '丽莎\n琴\n新增角色';
+    runner.saveInput();
+    expect(settings.roleBatch.names).toEqual(['丽莎', '琴', '新增角色']);
+    expect(settings.roleBatch.items.map((item) => item.id).slice(0, 2)).toEqual([ids[2], ids[0]]);
+    expect(settings.roleBatch.history.some((item) => item.name === '安柏' && item.failed)).toBe(true);
+    expect(f.recovery.read().names).toEqual(settings.roleBatch.names);
+    settings.roleNames = '';
+    runner.saveInput();
+    const reopened = f.create();
+    reopened.runner.restore();
+    expect(reopened.settings.roleBatch.names).toEqual([]);
+    expect(reopened.settings.roleBatch.items).toEqual([]);
+    reopened.settings.roleNames = '琴\n丽莎';
+    reopened.settings.totalChapters = 2;
+    reopened.runner.saveInput();
+    await run(reopened.runner);
+    expect(f.host.generateRoleReply).toHaveBeenCalledTimes(3);
+    expect(reopened.settings.roleBatch.items.map((item) => item.id)).toEqual([ids[0], ids[2]]);
 });
 
 it('storage failure prevents dispatch, and corrupt recovery is not silently used', async () => {

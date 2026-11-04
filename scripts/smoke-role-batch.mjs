@@ -377,7 +377,7 @@ try {
     const download = await downloaded;
     const downloadedLog = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
     assert.equal(downloadedLog.errors.length, 6);
-    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.4');
+    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.5');
     streamError = false;
     await restartBatch();
     holdResponse = true;
@@ -569,6 +569,13 @@ try {
     await startAndWait();
     assert.equal(requests.length, 15, 'Saved completion receipts prevent duplicate requests when progress is stale');
     await setNames(['恢复丙', '恢复丁', '恢复甲']);
+    const editedRows = await page.locator('#nag-role-results .ttw-memory-item').allTextContents();
+    assert.equal(editedRows.length, 3);
+    assert.ok(editedRows[0].includes('恢复丙') && editedRows[0].includes('✅'));
+    assert.ok(editedRows[1].includes('恢复丁') && !editedRows[1].includes('✅'));
+    assert.ok(editedRows[2].includes('恢复甲') && editedRows[2].includes('✅'));
+    assert.ok(editedRows.every((row) => !row.includes('恢复乙')));
+    assert.ok((await page.locator('#nag-progress-text').textContent()).startsWith('2 / 3'));
     await startAndWait();
     assert.equal(requests.length, 16);
     assert.ok(JSON.stringify(requests[15].messages).includes('恢复丁'));

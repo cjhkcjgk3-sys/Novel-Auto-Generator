@@ -51,6 +51,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
         if (!batch || active || preparing) return;
         batch.inputNames = getSettings().roleNames;
         batch.inputLimit = getSettings().totalChapters;
+        updateRoleNames(batch, parseRoleNames(batch.inputNames).slice(0, Math.max(1, batch.inputLimit)));
         try {
             checkpoint();
         } catch (error) {
