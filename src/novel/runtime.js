@@ -43,8 +43,8 @@ export function initNovelUI(host) {
         maxRetries: 3,
         minChapterLength: 100,
 
-        // 模型上下文隔离（防前文与提示词泄露给模型，用户界面仍完全可读）
-        hideHistoryFromModel: false,
+        // 仅隔离当前批次的结果楼层，保留原生备选数据及纯文本查看。
+        isolateRoleResult: false,
 
         // 导出设置
         exportAll: true,
@@ -67,9 +67,10 @@ export function initNovelUI(host) {
     };
 
     let settings = {};
+    let resultIsolation = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.3';
+    const pluginVersion = '1.9.4';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -231,8 +232,8 @@ export function initNovelUI(host) {
 <p>设置要自动生成的章节总数（同楼层批量生成模式下为目标角色总数）。</p>
 <h4>📌 提示词</h4>
 <p>每次自动发送给 AI 的消息内容（批量生成模式下为角色列表）。</p>
-<h4>📌 对模型隐藏前置上下文</h4>
-<p>手动物理开关。开启后，发送给模型时自动将当前任务楼层之前的所有历史消息在模型端标记为隐藏（不打包进Prompt），彻底防止前置历史与旧提示词泄露给模型并节省token；<b>用户在酒馆界面上仍完全可读历史消息，并且当前提示词楼层与最新一页备选回复实时保留供您观察。</b></p>
+<h4>📌 隔离写卡结果</h4>
+<p>仅针对当前批次的结果楼层：备选原文照常保存，当前页以只读纯文本显示，抑制前端自动渲染并排除该结果楼层的模型上下文。预设、命令及上方消息照常使用。关闭开关后恢复正常渲染，并在下次开启时重新建立原文校验基线。</p>
             `,
             },
             export: {
@@ -582,10 +583,26 @@ export function initNovelUI(host) {
             generationStats = stats;
         },
     });
+    resultIsolation = host.createRoleResultIsolation({
+        getBatch: () =>
+            settings.generationMode === 'role-batch' && settings.isolateRoleResult ? settings.roleBatch : null,
+        restoreLegacyVisibility: () => host.restoreLegacyVisibility(),
+        onError: (error, details) => {
+            recordError(error, details);
+            toastr.warning(error.message);
+        },
+    });
     const currentRunner = () => (settings.generationMode === 'role-batch' ? roleRunner : novelRunner);
     const roleStatusRenderer = createListRenderer();
 
-    function startGeneration() {
+    async function startGeneration() {
+        try {
+            await resultIsolation.prepare();
+        } catch (error) {
+            recordError(error, { phase: 'result-integrity' });
+            toastr.warning(error.message);
+            return;
+        }
         if (settings.generationMode === 'role-batch') {
             const currentPrompt = $('#nag-set-prompt').val();
             if (typeof currentPrompt === 'string') settings.roleNames = currentPrompt;
@@ -652,7 +669,19 @@ export function initNovelUI(host) {
         document.body.removeChild(a);
     }
 
+    async function verifyExportResults() {
+        try {
+            await resultIsolation?.verify();
+            return true;
+        } catch (error) {
+            recordError(error, { phase: 'result-integrity' });
+            toastr.warning(error.message);
+            return false;
+        }
+    }
+
     async function exportNovel(silent = false) {
+        if (!(await verifyExportResults())) return;
         const chapters = getAllChapters();
         if (!chapters.length) {
             if (!silent) toastr.warning('没有内容');
@@ -670,6 +699,7 @@ export function initNovelUI(host) {
     }
 
     async function exportAsJSON(silent = false) {
+        if (!(await verifyExportResults())) return;
         const chapters = getAllChapters();
         if (!chapters.length) {
             if (!silent) toastr.warning('没有内容');
@@ -687,48 +717,15 @@ export function initNovelUI(host) {
     // 设置 & UI
     // ============================================
 
-    function syncHistoryModelVisibility() {
-        const chat = getSTChat();
-        if (!chat || !Array.isArray(chat)) return;
-        const total = chat.length;
-        if (total === 0) return;
-
-        const promptFloor =
-            typeof settings.roleBatch?.promptFloor === 'number'
-                ? settings.roleBatch.promptFloor
-                : Math.max(0, total - 2);
-
-        let modified = false;
-        chat.forEach((msg, idx) => {
-            if (!msg) return;
-            if (idx < promptFloor) {
-                if (settings.hideHistoryFromModel) {
-                    if (!msg.is_hidden) {
-                        msg.is_hidden = true;
-                        msg._nag_hidden = true;
-                        modified = true;
-                    }
-                } else if (msg._nag_hidden) {
-                    msg.is_hidden = false;
-                    delete msg._nag_hidden;
-                    modified = true;
-                }
-            } else {
-                if (msg._nag_hidden) {
-                    msg.is_hidden = false;
-                    delete msg._nag_hidden;
-                    modified = true;
-                }
-            }
-        });
-
-        if (modified && host?.saveChat) {
-            host.saveChat();
-        }
-    }
-
     function loadSettings() {
         settings = Object.assign({}, defaultSettings, host.readSettings(extensionName));
+        const savedSettings = host.readSettings(extensionName);
+        if (!Object.hasOwn(savedSettings, 'isolateRoleResult'))
+            settings.isolateRoleResult = !!savedSettings.hideHistoryFromModel;
+        delete settings.hideHistoryFromModel;
+        void host
+            .restoreLegacyVisibility()
+            .catch((error) => recordError(error, { phase: 'restore-legacy-visibility' }));
         settings.panelCollapsed = Object.assign({}, defaultSettings.panelCollapsed, settings.panelCollapsed || {});
         settings.isRunning = false;
         settings.isPaused = false;
@@ -739,7 +736,7 @@ export function initNovelUI(host) {
             recordError(error, { phase: 'load-recovery' });
             toastr.warning(error.message);
         }
-        syncHistoryModelVisibility();
+        resultIsolation?.refresh();
     }
 
     function saveSettings() {
@@ -747,6 +744,7 @@ export function initNovelUI(host) {
     }
 
     function updateUI() {
+        resultIsolation?.refresh();
         const batchMode = settings.generationMode === 'role-batch';
         const batch = settings.roleBatch;
         if (batchMode && batch && !settings.isRunning) {
@@ -765,7 +763,8 @@ export function initNovelUI(host) {
         $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
         $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', settings.isRunning);
         $('#nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
-        $('#nag-set-minlen').prop('disabled', settings.isRunning);
+        $('#nag-set-minlen, #nag-set-isolate-result').prop('disabled', settings.isRunning);
+        $('.nag-result-isolation-setting').toggle(batchMode);
         $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
         $('#nag-total-label').text(batchMode ? '目标角色数' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
@@ -891,8 +890,8 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label>生成方式</label><select id="nag-set-mode"><option value="novel">原有自动续写</option><option value="role-batch">同楼层批量生成</option></select></div>
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
-                        <div class="nag-checkbox-group">
-                            <label class="nag-checkbox-label" title="开启后向模型发请求时自动对模型隐藏前置历史（防旧提示词泄露给模型并节省token）；您在酒馆界面上完全可读，且最新一页备选回复实时保留供您观察"><input type="checkbox" id="nag-set-hide-history-model"><span>🔒 对模型隐藏前置上下文（防旧提示词泄露，保留最新页且自身完全可读）</span></label>
+                        <div class="nag-checkbox-group nag-result-isolation-setting">
+                            <label class="nag-checkbox-label" title="只隔离当前结果楼层：保留纯文本查看，抑制自动渲染；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（纯文本查看）</span></label>
                         </div>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
@@ -1331,10 +1330,29 @@ export function initNovelUI(host) {
             settings.minChapterLength = +$(this).val() || 100;
             saveSettings();
         });
-        $('#nag-set-hide-history-model').on('change', function () {
-            settings.hideHistoryFromModel = $(this).prop('checked');
-            syncHistoryModelVisibility();
-            saveSettings();
+        $('#nag-set-isolate-result').on('change', async function () {
+            const wanted = $(this).prop('checked');
+            const previous = settings.isolateRoleResult;
+            if (settings.isRunning || host.snapshot().generating) {
+                $(this).prop('checked', previous);
+                return toastr.warning('请等待当前生成停止后切换结果隔离');
+            }
+            $(this).add('#nag-btn-start, #nag-btn-reset, #nag-btn-restart-role').prop('disabled', true);
+            try {
+                if (!wanted) await resultIsolation.resetProtection();
+                settings.isolateRoleResult = wanted;
+                resultIsolation.refresh();
+                if (wanted) await resultIsolation.prepare();
+                saveSettings();
+            } catch (error) {
+                settings.isolateRoleResult = previous;
+                resultIsolation.refresh();
+                recordError(error, { phase: 'result-isolation' });
+                toastr.warning(error.message);
+            } finally {
+                $(this).prop('checked', settings.isolateRoleResult);
+                updateUI();
+            }
         });
     }
 
@@ -1375,8 +1393,8 @@ export function initNovelUI(host) {
         $('#nag-set-autosave').val(settings.autoSaveInterval);
         $('#nag-set-retries').val(settings.maxRetries);
         $('#nag-set-minlen').val(settings.minChapterLength);
-        $('#nag-set-hide-history-model').prop('checked', Boolean(settings.hideHistoryFromModel));
-        syncHistoryModelVisibility();
+        $('#nag-set-isolate-result').prop('checked', Boolean(settings.isolateRoleResult));
+        resultIsolation?.refresh();
 
         toggleTagSettings();
         updateUI();
@@ -1407,18 +1425,7 @@ export function initNovelUI(host) {
             clearInterval(refreshTimer);
             disposed = true;
             cleanupHelp?.();
-            const chat = getSTChat();
-            if (Array.isArray(chat)) {
-                let mod = false;
-                chat.forEach((m) => {
-                    if (m?._nag_hidden) {
-                        m.is_hidden = false;
-                        delete m._nag_hidden;
-                        mod = true;
-                    }
-                });
-                if (mod && host?.saveChat) host.saveChat();
-            }
+            resultIsolation?.dispose();
             $('#nag-container').remove();
             if (window.nagDebug === debugRawContent) delete window.nagDebug;
             instance = null;

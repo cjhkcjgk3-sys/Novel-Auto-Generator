@@ -1,1 +1,1 @@
-import './src/bootstrap.js';
+export { enableNovelExtension, disposeNovelExtension } from './src/bootstrap.js';
