@@ -731,31 +731,3 @@
         gap: 0;
     }
 }
-
-/* ============================================
-   静默模式 / 隐藏备选与前置消息
-   ============================================ */
-
-body.nag-hide-swipes #chat .mes:last-child .mes_text,
-body.nag-hide-swipes #chat .mes:not(:has(~ .mes)) .mes_text {
-    display: none !important;
-}
-
-body.nag-hide-swipes #chat .mes:last-child::after,
-body.nag-hide-swipes #chat .mes:not(:has(~ .mes))::after {
-    content: '🔒 备选回复已完全隐藏（静默防卡顿／防提示词泄露）';
-    display: block;
-    padding: 10px 14px;
-    margin: 8px 0;
-    background: rgba(0, 0, 0, 0.25);
-    border: 1px dashed rgba(255, 255, 255, 0.2);
-    border-radius: 6px;
-    text-align: center;
-    font-size: 13px;
-    color: var(--SmartThemeQuoteColor, #aaa);
-}
-
-body.nag-hide-history #chat .mes:has(~ .mes),
-body.nag-hide-history #chat .mes:not(:last-child) {
-    display: none !important;
-}

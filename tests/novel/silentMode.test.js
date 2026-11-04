@@ -2,24 +2,20 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 
-describe('Silent mode and swipe hiding settings', () => {
+describe('Silent mode and model context isolation', () => {
     const runtimePath = path.resolve(__dirname, '../../src/novel/runtime.js');
     const stylePath = path.resolve(__dirname, '../../style.css');
 
-    it('defines hideSwipes and hideChatHistory in runtime.js defaultSettings', () => {
+    it('defines hideHistoryFromModel in runtime.js defaultSettings', () => {
         const content = fs.readFileSync(runtimePath, 'utf8');
-        expect(content).toContain('hideSwipes: false');
-        expect(content).toContain('hideChatHistory: false');
-        expect(content).toContain('function applySilentClasses()');
-        expect(content).toContain('nag-hide-swipes');
-        expect(content).toContain('nag-hide-history');
+        expect(content).toContain('hideHistoryFromModel: false');
+        expect(content).toContain('function syncHistoryModelVisibility()');
+        expect(content).toContain('#nag-set-hide-history-model');
     });
 
-    it('contains CSS rules to hide candidate replies and prior history', () => {
+    it('does not physically lock out or blackout user screen with display:none in style.css', () => {
         const css = fs.readFileSync(stylePath, 'utf8');
-        expect(css).toContain('body.nag-hide-swipes');
-        expect(css).toContain('body.nag-hide-history');
-        expect(css).toContain('display: none !important;');
-        expect(css).toContain('🔒 备选回复已完全隐藏');
+        expect(css).not.toContain('body.nag-hide-swipes');
+        expect(css).not.toContain('body.nag-hide-history');
     });
 });
