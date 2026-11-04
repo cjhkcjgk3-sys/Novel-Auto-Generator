@@ -43,6 +43,10 @@ export function initNovelUI(host) {
         maxRetries: 3,
         minChapterLength: 100,
 
+        // 静默隐藏设置
+        hideSwipes: false,
+        hideChatHistory: false,
+
         // 导出设置
         exportAll: true,
         exportStartFloor: 0,
@@ -66,7 +70,7 @@ export function initNovelUI(host) {
     let settings = {};
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.1';
+    const pluginVersion = '1.9.2';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -196,7 +200,9 @@ export function initNovelUI(host) {
             const isUser = msg.getAttribute('is_user') === 'true';
             if (isUser && !settings.exportIncludeUser) return;
             if (!isUser && !settings.exportIncludeAI) return;
-            const text = msg.querySelector('.mes_text')?.innerText?.trim();
+            const text = (
+                msg.querySelector('.mes_text')?.innerText || msg.querySelector('.mes_text')?.textContent
+            )?.trim();
             if (!text) return;
             const content = useTagFilters
                 ? applyTagFilters(text, {
@@ -223,9 +229,13 @@ export function initNovelUI(host) {
                 title: '📝 生成设置说明',
                 content: `
 <h4>📌 目标章节</h4>
-<p>设置要自动生成的章节总数。</p>
+<p>设置要自动生成的章节总数（同楼层批量生成模式下为目标角色总数）。</p>
 <h4>📌 提示词</h4>
-<p>每次自动发送给 AI 的消息内容。</p>
+<p>每次自动发送给 AI 的消息内容（批量生成模式下为角色列表）。</p>
+<h4>📌 完全隐藏备选回复正文</h4>
+<p>手动开关。开启后隐藏最新备选回复（swipe）的内容，仅保留防卡顿占位符，大幅降低频繁流式重绘开销与视线干扰；后台角色生成与备选写入完全正常进行。</p>
+<h4>📌 折叠隐藏前置历史消息</h4>
+<p>手动开关。开启后折叠隐藏当前最新楼层之前的历史聊天消息，提供极简专注的写卡工作台。</p>
             `,
             },
             export: {
@@ -680,6 +690,12 @@ export function initNovelUI(host) {
     // 设置 & UI
     // ============================================
 
+    function applySilentClasses() {
+        if (typeof $ === 'undefined') return;
+        $('body').toggleClass('nag-hide-swipes', Boolean(settings.hideSwipes));
+        $('body').toggleClass('nag-hide-history', Boolean(settings.hideChatHistory));
+    }
+
     function loadSettings() {
         settings = Object.assign({}, defaultSettings, host.readSettings(extensionName));
         settings.panelCollapsed = Object.assign({}, defaultSettings.panelCollapsed, settings.panelCollapsed || {});
@@ -692,6 +708,7 @@ export function initNovelUI(host) {
             recordError(error, { phase: 'load-recovery' });
             toastr.warning(error.message);
         }
+        applySilentClasses();
     }
 
     function saveSettings() {
@@ -843,6 +860,10 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label>生成方式</label><select id="nag-set-mode"><option value="novel">原有自动续写</option><option value="role-batch">同楼层批量生成</option></select></div>
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
+                        <div class="nag-checkbox-group">
+                            <label class="nag-checkbox-label" title="开启后完全隐藏最新一条回复（备选回复）正文，防止频繁重绘卡顿与视线干扰，不影响后台继续生成"><input type="checkbox" id="nag-set-hide-swipes"><span>🔒 完全隐藏备选回复正文（静默防卡顿／防提示词泄露）</span></label>
+                            <label class="nag-checkbox-label" title="开启后折叠隐藏当前最新楼层之前的所有历史消息，专注当前批次生成"><input type="checkbox" id="nag-set-hide-history"><span>📁 折叠隐藏前置历史消息（专注写卡）</span></label>
+                        </div>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
                 </div>
@@ -1280,6 +1301,16 @@ export function initNovelUI(host) {
             settings.minChapterLength = +$(this).val() || 100;
             saveSettings();
         });
+        $('#nag-set-hide-swipes').on('change', function () {
+            settings.hideSwipes = $(this).prop('checked');
+            applySilentClasses();
+            saveSettings();
+        });
+        $('#nag-set-hide-history').on('change', function () {
+            settings.hideChatHistory = $(this).prop('checked');
+            applySilentClasses();
+            saveSettings();
+        });
     }
 
     function syncUI() {
@@ -1319,6 +1350,9 @@ export function initNovelUI(host) {
         $('#nag-set-autosave').val(settings.autoSaveInterval);
         $('#nag-set-retries').val(settings.maxRetries);
         $('#nag-set-minlen').val(settings.minChapterLength);
+        $('#nag-set-hide-swipes').prop('checked', Boolean(settings.hideSwipes));
+        $('#nag-set-hide-history').prop('checked', Boolean(settings.hideChatHistory));
+        applySilentClasses();
 
         toggleTagSettings();
         updateUI();
@@ -1349,7 +1383,10 @@ export function initNovelUI(host) {
             clearInterval(refreshTimer);
             disposed = true;
             cleanupHelp?.();
-            $('#nag-container').remove();
+            if (typeof $ !== 'undefined') {
+                $('body').removeClass('nag-hide-swipes nag-hide-history');
+                $('#nag-container').remove();
+            }
             if (window.nagDebug === debugRawContent) delete window.nagDebug;
             instance = null;
         },
