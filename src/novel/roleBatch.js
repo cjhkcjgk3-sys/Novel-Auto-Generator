@@ -8,7 +8,7 @@ export const parseRoleNames = (text) =>
         .filter(Boolean);
 
 /** One sequential batch, using the existing settings and controls. */
-export function createRoleBatchRunner({ getSettings, host, onChange, notify, onStats }) {
+export function createRoleBatchRunner({ getSettings, host, onChange, notify, onStats, onError = () => {} }) {
     let active = null;
     const state = () => getSettings().roleBatch;
     function assertCurrent(run) {
@@ -46,6 +46,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 return;
             }
         } catch (error) {
+            onError(error, { phase: 'prepare' });
             notify('warning', error.message);
             return;
         }
@@ -85,7 +86,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                         );
                         assertCurrent(run);
                         batch.pending = false;
-                        if (!reply.text?.trim()) throw new Error('没有返回内容');
+                        if (!reply.text?.trim()) throw reply.error || new Error('没有返回内容');
                         batch.items[batch.index] = {
                             name,
                             processed: true,
@@ -101,6 +102,14 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                         break;
                     } catch (error) {
                         assertCurrent(run);
+                        onError(error, {
+                            phase: error.phase || 'generate-reply',
+                            roleIndex: batch.index + 1,
+                            attempt,
+                            promptFloor: batch.promptFloor,
+                            resultFloor: batch.resultFloor,
+                            generating: host.snapshot().generating,
+                        });
                         batch.pending = !!error.uncertain;
                         if (error.uncertain || attempt === 3) {
                             batch.items[batch.index] = { name, processed: true, failed: true, error: error.message };
@@ -126,6 +135,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 try {
                     await host.restoreRoleTemplate?.(batch);
                 } catch (error) {
+                    onError(error, { phase: 'restore-template' });
                     notify('warning', `恢复提示词模板失败：${error.message}`);
                 }
             }
