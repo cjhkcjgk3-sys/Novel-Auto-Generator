@@ -314,9 +314,11 @@ export function createSillyTavernHost({
                 await discardEmptyReply();
                 return { text: '', swipe: null, truncated: false, error };
             }
-            markReceipt(getContext()?.streamingProcessor?.isStopped ? 'partial' : 'complete');
+            const processor = getContext()?.streamingProcessor;
+            const isStreamInterrupted = Boolean(processor && (!processor.isFinished || processor.isStopped));
+            markReceipt(isStreamInterrupted ? 'partial' : 'complete');
             await context.saveChat();
-            return { text, swipe: reply.swipe_id, truncated: !!getContext()?.streamingProcessor?.isStopped };
+            return { text, swipe: reply.swipe_id, truncated: isStreamInterrupted };
         } catch (error) {
             if (failure) throw failure;
             if (batch.resultFloor == null && messages.length === batch.promptFloor + 2 && !messages.at(-1)?.is_user)

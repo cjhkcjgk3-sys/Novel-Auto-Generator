@@ -1,5 +1,5 @@
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
-import { roleComplete } from './roleBatchState.js';
+import { roleComplete, updateRoleNames } from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
@@ -579,6 +579,11 @@ export function initNovelUI(host) {
     const roleStatusRenderer = createListRenderer();
 
     function startGeneration() {
+        if (settings.generationMode === 'role-batch') {
+            const currentPrompt = $('#nag-set-prompt').val();
+            if (typeof currentPrompt === 'string') settings.roleNames = currentPrompt;
+            roleRunner.saveInput();
+        }
         return currentRunner().start();
     }
     function pauseGeneration() {
@@ -696,6 +701,14 @@ export function initNovelUI(host) {
     function updateUI() {
         const batchMode = settings.generationMode === 'role-batch';
         const batch = settings.roleBatch;
+        if (batchMode && batch && !settings.isRunning) {
+            const parsed = parseRoleNames(settings.roleNames).slice(0, Math.max(1, settings.totalChapters));
+            if (batch.names && JSON.stringify(batch.names) !== JSON.stringify(parsed)) {
+                updateRoleNames(batch, parsed);
+                batch.inputNames = settings.roleNames;
+                batch.inputLimit = settings.totalChapters;
+            }
+        }
         const roleNames = batch?.names || parseRoleNames(settings.roleNames).slice(0, settings.totalChapters);
         const total = batchMode ? roleNames.length : settings.totalChapters;
         const completed = batchMode ? batch?.items?.filter(roleComplete).length || 0 : settings.currentChapter;
@@ -703,7 +716,9 @@ export function initNovelUI(host) {
         $('#nag-progress-fill').css('width', `${pct}%`);
         $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
         $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', settings.isRunning);
-        $('#nag-set-minlen, #nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
+        $('#nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
+        $('#nag-set-minlen').prop('disabled', settings.isRunning);
+        $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
         $('#nag-total-label').text(batchMode ? '目标角色数' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
         $('#nag-role-results')
@@ -1240,13 +1255,13 @@ export function initNovelUI(host) {
             saveSettings();
             updateUI();
         });
-        $('#nag-set-total').on('change', function () {
+        $('#nag-set-total').on('input change', function () {
             settings.totalChapters = +$(this).val() || 1000;
             if (settings.generationMode === 'role-batch') roleRunner.saveInput();
             saveSettings();
             updateUI();
         });
-        $('#nag-set-prompt').on('change', function () {
+        $('#nag-set-prompt').on('input change', function () {
             if (settings.generationMode === 'role-batch') settings.roleNames = $(this).val();
             else settings.prompt = $(this).val();
             if (settings.generationMode === 'role-batch') roleRunner.saveInput();

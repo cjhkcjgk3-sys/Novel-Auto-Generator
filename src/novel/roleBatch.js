@@ -1,6 +1,7 @@
 import { abortableDelay, throwIfAborted } from '../../txtToWorldbook/core/requestPolicy.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
 import { hydrateRoleBatch, nextRoleIndex, roleComplete, updateRoleNames } from './roleBatchState.js';
+import { isRoleCardTruncated } from './tagFilters.js';
 
 export const ROLE_PLACEHOLDER = '[[角色名]]';
 export const parseRoleNames = (text) =>
@@ -171,10 +172,22 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                             legacy: false,
                             processing: false,
                             processed: true,
-                            failed: !!reply.truncated,
+                            failed: Boolean(
+                                reply.truncated ||
+                                isRoleCardTruncated(reply.text, {
+                                    minLength: settings.minChapterLength,
+                                    expectedClosingTags: settings.expectedClosingTags,
+                                }),
+                            ),
                             swipe: reply.swipe,
                         };
-                        if (reply.truncated) stats.errors.push({ chapter: batch.index + 1, error: '内容截断' });
+                        const truncated =
+                            reply.truncated ||
+                            isRoleCardTruncated(reply.text, {
+                                minLength: settings.minChapterLength,
+                                expectedClosingTags: settings.expectedClosingTags,
+                            });
+                        if (truncated) stats.errors.push({ chapter: batch.index + 1, error: '角色卡未闭合或内容截断' });
                         batch.index++;
                         batch.dispatch = null;
                         stats.chaptersGenerated++;

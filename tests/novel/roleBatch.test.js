@@ -187,3 +187,16 @@ it('retains the task but does not dispatch when the restored host is disconnecte
     expect(settings.roleBatch.names).toEqual(['琴', '安柏', '丽莎']);
     expect(settings.isRunning).toBe(false);
 });
+
+it('marks unclosed role card tags as truncated failure instead of completed', async () => {
+    vi.useFakeTimers();
+    const unclosedReply = { text: '<character>\n名字：琴\n性格：温柔' };
+    const { settings, host, runner } = setup([unclosedReply]);
+    settings.totalChapters = 1;
+    settings.roleNames = '琴';
+    const task = runner.start();
+    await vi.runAllTimersAsync();
+    await task;
+    expect(host.generateRoleReply).toHaveBeenCalledTimes(1);
+    expect(settings.roleBatch.items[0]).toMatchObject({ name: '琴', failed: true });
+});
