@@ -84,7 +84,7 @@ it('marks failure and stops the batch after exactly three empty replies', async 
     expect(host.generateRoleReply).toHaveBeenCalledTimes(3);
     expect(settings.roleBatch.index).toBe(0);
     expect(settings.roleBatch.items[0]).toMatchObject({ name: '琴', failed: true });
-    expect(settings.roleBatch.items[1]).toBeUndefined();
+    expect(settings.roleBatch.items[1]?.processed).not.toBe(true);
     expect(settings.isRunning).toBe(false);
     expect(host.restoreRoleTemplate).toHaveBeenCalledWith(settings.roleBatch);
 });
@@ -108,7 +108,7 @@ it('does not advance for a truncation signal with no returned text', async () =>
     await task;
     expect(host.generateRoleReply).toHaveBeenCalledTimes(3);
     expect(settings.roleBatch.index).toBe(0);
-    expect(settings.roleBatch.items[1]).toBeUndefined();
+    expect(settings.roleBatch.items[1]?.processed).not.toBe(true);
 });
 
 it('keeps uncertain requests pending and does not blindly resend on restart', async () => {
@@ -177,4 +177,13 @@ it('treats names containing replacement symbols as literal text', async () => {
     await vi.runAllTimersAsync();
     await task;
     expect(host.generateRoleReply.mock.calls[0][1]).toBe('生成 $&，名字为 $&');
+});
+
+it('retains the task but does not dispatch when the restored host is disconnected', async () => {
+    const { runner, host, snapshot, settings } = setup();
+    snapshot.connected = false;
+    await runner.start();
+    expect(host.generateRoleReply).not.toHaveBeenCalled();
+    expect(settings.roleBatch.names).toEqual(['琴', '安柏', '丽莎']);
+    expect(settings.isRunning).toBe(false);
 });

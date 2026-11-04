@@ -20,7 +20,11 @@ afterEach(() => vi.useRealTimers());
 function setup() {
     const context = { chatId: 'a', characterId: 1, chat: [{ is_user: false, mes: '正文' }] };
     context.eventSource = new EventEmitter();
-    context.eventTypes = { GENERATION_STOPPED: 'generation_stopped', GENERATION_STARTED: 'generation_started' };
+    context.eventTypes = {
+        GENERATION_STOPPED: 'generation_stopped',
+        GENERATION_STARTED: 'generation_started',
+        MESSAGE_RECEIVED: 'message_received',
+    };
     context.stopGeneration = vi.fn(() => context.eventSource.emit(context.eventTypes.GENERATION_STOPPED));
     const button = { length: 1, prop: vi.fn(() => false), trigger: vi.fn() };
     const input = { 0: { value: '' }, length: 1, val: vi.fn(), trigger: vi.fn() };
@@ -284,5 +288,93 @@ it('does not accept existing content when native swipe never starts a generation
         actualSwipe: 0,
     });
     expect(context.chat[2].mes).toBe('旧成品');
+    expect(context.generate).not.toHaveBeenCalled();
+});
+
+it('writes completion receipts before native generation returns, so recovery can adopt a saved result', async () => {
+    const { host, context } = batchSetup(false);
+    const batch = {
+        ...host.prepareRoleBatch(),
+        id: 'task-1',
+        identity: host.snapshot().identity,
+        names: ['琴'],
+        items: [{ id: 'role-1', name: '琴' }],
+        pending: true,
+        dispatch: { itemId: 'role-1', attemptId: 'try-1' },
+    };
+    let finish;
+    context.generate.mockImplementation(async () => {
+        context.eventSource.emit(context.eventTypes.GENERATION_STARTED, 'regenerate');
+        context.chat.push({ mes: '正常完整结果', is_user: false, swipe_id: 0, swipes: ['正常完整结果'], extra: {} });
+        context.eventSource.emit(context.eventTypes.MESSAGE_RECEIVED, 2, 'normal');
+        await new Promise((resolve) => {
+            finish = resolve;
+        });
+    });
+    const task = host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} });
+    while (!finish) await Promise.resolve();
+    const savedChat = structuredClone(context.chat);
+    expect(savedChat[2].swipe_info[0].extra.nag_role_batch.status).toBe('complete');
+    const reopened = createSillyTavernHost({
+        getContext: () => ({ ...context, chat: savedChat }),
+        getDocument: () => ({ querySelector: () => null }),
+    });
+    await reopened.reconcileRoleBatch(batch);
+    expect(batch.items[0]).toMatchObject({ processed: true, failed: false, swipe: 0 });
+    expect(batch.pending).toBe(false);
+    finish();
+    await task;
+});
+
+it('does not adopt partial or unmarked text and repairs moved or deleted completed page bindings', async () => {
+    const { host, context } = batchSetup();
+    const batch = {
+        ...host.prepareRoleBatch(),
+        id: 'task-1',
+        identity: host.snapshot().identity,
+        names: ['琴'],
+        items: [{ id: 'role-1', name: '琴' }],
+        pending: true,
+    };
+    context.chat[2].swipe_info = [
+        { extra: { nag_role_batch: { taskId: 'task-1', itemId: 'role-1', status: 'pending' } } },
+    ];
+    await host.reconcileRoleBatch(batch);
+    expect(batch.items[0].processed).not.toBe(true);
+    context.chat[2].swipes.push('完成结果');
+    context.chat[2].swipe_info.push({
+        extra: { nag_role_batch: { taskId: 'task-1', itemId: 'role-1', status: 'complete' } },
+    });
+    await host.reconcileRoleBatch(batch);
+    expect(batch.items[0].swipe).toBe(1);
+    context.chat[2].swipes.pop();
+    context.chat[2].swipe_info.pop();
+    await host.reconcileRoleBatch(batch);
+    expect(batch.items[0].processed).toBe(false);
+});
+
+it('keeps legacy completion bindings until the migrated chat receipts are saved', async () => {
+    const { host, context } = batchSetup();
+    const batch = {
+        ...host.prepareRoleBatch(),
+        id: 'migrated-task',
+        identity: host.snapshot().identity,
+        items: [{ id: 'legacy-role', name: '琴', legacy: true, processed: true, swipe: 0 }],
+    };
+    context.saveChat.mockRejectedValueOnce(new Error('save failed'));
+    await expect(host.reconcileRoleBatch(batch)).rejects.toThrow('save failed');
+    expect(batch.items[0].legacy).toBe(true);
+    await host.reconcileRoleBatch(batch);
+    expect(context.saveChat).toHaveBeenCalledTimes(2);
+    expect(batch.items[0]).toMatchObject({ processed: true, failed: false, legacy: false });
+});
+
+it('does not modify a prompt or dispatch when Tavern has no API connection', async () => {
+    const { host, context } = batchSetup();
+    context.onlineStatus = 'no_connection';
+    await expect(
+        host.generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {} }),
+    ).rejects.toMatchObject({ code: 'NOT_CONNECTED' });
+    expect(context.chat[1].mes).toBe('生成 [[角色名]]');
     expect(context.generate).not.toHaveBeenCalled();
 });

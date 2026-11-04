@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -14,14 +15,53 @@ const browser = await chromium.launch(launch);
 try {
     const page = await browser.newPage();
     page.setDefaultTimeout(15000);
+    const restartBatch = async () => {
+        await page.evaluate(() => document.getElementById('nag-btn-restart-role').click());
+        await page
+            .locator('dialog[open]')
+            .filter({ hasText: '从头生成全部角色' })
+            .last()
+            .locator('.popup-button-ok')
+            .dispatchEvent('click');
+        await page.waitForFunction(
+            () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+        );
+    };
+    const resetKeep = () =>
+        page.evaluate(async () => {
+            await window.jQuery('#nag-btn-reset').triggerHandler('click');
+        });
+    const connect = async () => {
+        await page.locator('#api_button_openai').dispatchEvent('click');
+        await page.waitForFunction(() => window.SillyTavern.getContext().onlineStatus !== 'no_connection');
+    };
     const requests = [];
     const requestPages = [];
     let emptyReplies = false;
     let streamError = false;
     let holdResponse = false;
+    let holdRole = null;
     let releaseResponse;
     let onHeld;
     const errors = [];
+    const saves = [];
+    page.on('request', (request) => {
+        if (!request.url().endsWith('/api/chats/save')) return;
+        try {
+            const data = request.postDataBuffer();
+            const payload = JSON.parse(
+                (request.headers()['content-encoding'] === 'gzip' ? gunzipSync(data) : data).toString(),
+            );
+            const message = payload.chat.at(-1);
+            saves.push({
+                body: message.mes?.match(/ROLE_RESULT_\d+/)?.[0],
+                extra: message.extra?.nag_role_batch,
+                receipts: message.swipe_info?.map((info) => info?.extra?.nag_role_batch),
+            });
+        } catch (error) {
+            console.error('Cannot inspect synthetic save', error.message);
+        }
+    });
     let initializing = true;
     page.on('console', async (message) => {
         if (initializing && message.type() === 'error') {
@@ -53,7 +93,7 @@ try {
                     ?.textContent?.replace(/[\s\u200B-\u200D\uFEFF]/g, ''),
             })),
         );
-        if (holdResponse) {
+        if (holdResponse || (holdRole && JSON.stringify(body.messages).includes(holdRole))) {
             await new Promise((resolve) => {
                 releaseResponse = resolve;
                 onHeld?.();
@@ -161,6 +201,28 @@ try {
         avatar,
     );
     assert.ok(index >= 0, 'Imported writing assistant is available');
+    const reopenChat = async () => {
+        await page.evaluate(async (index) => {
+            const c = window.SillyTavern.getContext();
+            await new Promise((resolve, reject) => {
+                const finish = () => {
+                    clearTimeout(timer);
+                    c.eventSource.removeListener(c.eventTypes.CHAT_LOADED, finish);
+                    resolve();
+                };
+                const timer = setTimeout(() => {
+                    c.eventSource.removeListener(c.eventTypes.CHAT_LOADED, finish);
+                    reject(new Error('Original chat did not finish loading'));
+                }, 15000);
+                c.eventSource.on(c.eventTypes.CHAT_LOADED, finish);
+                document.getElementById('CharID' + index).click();
+            });
+        }, index);
+        await page.waitForFunction((index) => {
+            const c = window.SillyTavern.getContext();
+            return Number(c.characterId) === index && c.chat.length === 3 && c.chat[1]?.mes.includes('小助手生成角色');
+        }, index);
+    };
     await page.locator('#CharID' + index).dispatchEvent('click');
     await page.waitForFunction(() => SillyTavern.getContext().chat.length > 0);
     await page
@@ -201,11 +263,8 @@ try {
             node.value = value;
             node.dispatchEvent(new Event('change'));
         }
-        document.getElementById('nag-btn-reset').click();
     });
-    await page.waitForFunction(
-        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
-    );
+    await restartBatch();
     // A previous manual stop must not leave the next generation using an aborted core controller.
     await page.locator('#nag-btn-clear-errors').dispatchEvent('click');
     await page.evaluate(() => window.SillyTavern.getContext().stopGeneration());
@@ -254,10 +313,7 @@ try {
         assert.ok(result.replies[i].includes(`ROLE_RESULT_${i + 1}`));
     });
     emptyReplies = true;
-    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
-    await page.waitForFunction(
-        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
-    );
+    await restartBatch();
     await page.evaluate(() => {
         for (const [id, value] of Object.entries({
             'nag-set-prompt': '无响应角色\n不会执行的角色',
@@ -282,7 +338,7 @@ try {
     );
     assert.equal(requests.length, 6, 'Exactly three empty attempts, no request for the next name');
     assert.equal(failure.index, 0);
-    assert.equal(failure.items[1], undefined);
+    assert.notEqual(failure.items[1]?.processed, true);
     assert.equal(
         await page.evaluate(() => window.SillyTavern.getContext().chat[2].swipes.length),
         3,
@@ -290,10 +346,7 @@ try {
     );
     emptyReplies = false;
     streamError = true;
-    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
-    await page.waitForFunction(
-        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
-    );
+    await restartBatch();
     await page.evaluate(() => document.getElementById('nag-btn-start').click());
     await page.waitForFunction(
         () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].isRunning,
@@ -305,7 +358,7 @@ try {
     );
     assert.equal(streamFailure.index, 0, 'A swallowed streaming error must not count as a generated character');
     assert.equal(streamFailure.items[0].failed, true);
-    assert.equal(streamFailure.items[1], undefined);
+    assert.notEqual(streamFailure.items[1]?.processed, true);
     assert.equal(requests.length, 9, 'Three streaming failures must stop without processing the next name');
     const afterFailure = await page.evaluate(() => ({
         prompt: window.SillyTavern.getContext().chat[1].mes,
@@ -324,12 +377,9 @@ try {
     const download = await downloaded;
     const downloadedLog = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
     assert.equal(downloadedLog.errors.length, 6);
-    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.3');
+    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.4');
     streamError = false;
-    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
-    await page.waitForFunction(
-        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
-    );
+    await restartBatch();
     holdResponse = true;
     const held = new Promise((resolve) => {
         onHeld = resolve;
@@ -345,9 +395,9 @@ try {
     await page.waitForFunction(
         () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].isRunning,
     );
-    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
+    await resetKeep();
     await page.waitForFunction(
-        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch?.pending,
     );
     await page.evaluate(() => {
         for (const [id, value] of Object.entries({ 'nag-set-total': '1', 'nag-set-prompt': '停止后重新开始' })) {
@@ -371,6 +421,11 @@ try {
     assert.deepEqual(restartedReplies.slice(0, 3), result.replies);
     assert.ok(restartedReplies.at(-1).includes('ROLE_RESULT_11'));
     assert.equal(restarted.errorLog.length, 6, 'Manual stopping and successful restarting are not errors');
+    // Error logs use the host's ordinary settings save; task recovery below deliberately does not wait for it.
+    await page.evaluate(async () => {
+        const core = await import('/script.js');
+        await core.saveSettings();
+    });
     await page.reload({ waitUntil: 'networkidle' });
     await page.waitForFunction(() => document.getElementById('nag-btn-error-log'));
     assert.equal(
@@ -379,6 +434,151 @@ try {
         ),
         6,
     );
+    // Resume from the same journal after a tab is reloaded in the middle of a request.
+    await reopenChat();
+    await connect();
+    const initialRecovery = await page.evaluate(() => {
+        const c = window.SillyTavern.getContext();
+        return {
+            batch: c.extensionSettings['novel-auto-generator'].roleBatch,
+            pages: c.chat[2]?.swipe_info?.map((info) => info?.extra?.nag_role_batch),
+        };
+    });
+    const setNames = (names) =>
+        page.evaluate((names) => {
+            for (const [id, value] of Object.entries({
+                'nag-set-total': String(names.length),
+                'nag-set-prompt': names.join('\n'),
+            })) {
+                const element = document.getElementById(id);
+                element.value = value;
+                element.dispatchEvent(new Event('change'));
+            }
+        }, names);
+    const startAndWait = () =>
+        page.evaluate(async () => {
+            await window.jQuery('#nag-btn-start').triggerHandler('click');
+        });
+    await resetKeep();
+    await startAndWait();
+    assert.equal(requests.length, 11, JSON.stringify({ initialRecovery, saves: saves.slice(-8) }));
+    await restartBatch();
+    await setNames(['恢复甲', '恢复乙', '恢复丙']);
+    holdRole = '恢复乙';
+    const interrupted = new Promise((resolve) => {
+        onHeld = resolve;
+    });
+    await page.evaluate(() => document.getElementById('nag-btn-start').click());
+    let interruptedTimer;
+    try {
+        await Promise.race([
+            interrupted,
+            new Promise((_, reject) => {
+                interruptedTimer = setTimeout(
+                    () => reject(new Error('Recovery interruption request did not start')),
+                    20000,
+                );
+            }),
+        ]);
+    } catch (error) {
+        console.error(
+            'Recovery interruption state:',
+            await page.evaluate(() => {
+                const c = window.SillyTavern.getContext();
+                const s = c.extensionSettings['novel-auto-generator'];
+                return {
+                    connected: c.onlineStatus,
+                    mode: s.generationMode,
+                    names: s.roleNames,
+                    batch: s.roleBatch,
+                    running: s.isRunning,
+                    prompt: c.chat.at(-2)?.mes,
+                    errors: s.errorLog,
+                    notices: document.querySelector('#toast-container')?.textContent,
+                };
+            }),
+        );
+        throw error;
+    } finally {
+        clearTimeout(interruptedTimer);
+    }
+    const taskId = await page.evaluate(
+        () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch.id,
+    );
+    const recoverySnapshot = () =>
+        page.evaluate(() => {
+            const c = window.SillyTavern.getContext();
+            return {
+                items: c.extensionSettings['novel-auto-generator'].roleBatch.items,
+                pages: c.chat[2]?.swipe_info?.map((info) => info?.extra?.nag_role_batch),
+            };
+        });
+    const beforeReload = await recoverySnapshot();
+    const navigation = page.waitForEvent('framenavigated', { predicate: (frame) => frame === page.mainFrame() });
+    const reload = page.reload({ waitUntil: 'networkidle' });
+    await navigation;
+    holdRole = null;
+    releaseResponse();
+    await reload;
+    await page.waitForFunction(() => document.getElementById('nag-btn-start'));
+    await reopenChat();
+    await connect();
+    assert.equal(requests.length, 13, 'Reopening restores state without automatically starting the model');
+    assert.equal(
+        await page.evaluate(
+            () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch.id,
+        ),
+        taskId,
+    );
+    const afterReload = await recoverySnapshot();
+    assert.ok(
+        afterReload.pages?.some(
+            (receipt) =>
+                receipt?.taskId === taskId &&
+                receipt.itemId === afterReload.items[0].id &&
+                receipt.status === 'complete',
+        ),
+        JSON.stringify({ beforeReload, afterReload }),
+    );
+    await startAndWait();
+    assert.equal(
+        requests.length,
+        15,
+        JSON.stringify({ beforeReload, afterReload, prompts: requests.slice(13).map((r) => r.messages.at(-1)) }),
+    );
+    assert.ok(JSON.stringify(requests[13].messages).includes('恢复乙'));
+    assert.ok(JSON.stringify(requests[14].messages).includes('恢复丙'));
+    // Emulate a crash after native chat save but before the task's completion checkpoint.
+    await page.evaluate(() => {
+        const key = 'novel-auto-generator:role-batch:v1';
+        const batch = JSON.parse(localStorage.getItem(key));
+        batch.items.forEach((item) => {
+            item.processed = false;
+        });
+        batch.index = 0;
+        batch.pending = true;
+        batch.revision += 100;
+        batch.updatedAt = Date.now();
+        batch.dispatch = { itemId: batch.items[0].id, attemptId: 'lost-checkpoint' };
+        localStorage.setItem(key, JSON.stringify(batch));
+    });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForFunction(() => document.getElementById('nag-btn-start'));
+    await reopenChat();
+    await connect();
+    await startAndWait();
+    assert.equal(requests.length, 15, 'Saved completion receipts prevent duplicate requests when progress is stale');
+    await setNames(['恢复丙', '恢复丁', '恢复甲']);
+    await startAndWait();
+    assert.equal(requests.length, 16);
+    assert.ok(JSON.stringify(requests[15].messages).includes('恢复丁'));
+    await setNames(['恢复乙', '恢复丙', '恢复丁', '恢复甲']);
+    await startAndWait();
+    assert.equal(requests.length, 16, 'Re-adding an already completed role reuses its task record');
+    await restartBatch();
+    await setNames(['恢复甲', '恢复乙', '恢复丙']);
+    await startAndWait();
+    assert.equal(requests.length, 19, 'Only an explicit confirmed restart regenerates all roles');
     assert.deepEqual(errors, []);
     console.log(
         JSON.stringify({
@@ -394,6 +594,9 @@ try {
             manualStopRestart: true,
             nativeSwipeCounterVerified: true,
             errorLogDownload: true,
+            reloadResume: true,
+            staleProgressReconciled: true,
+            editedNamesPreserveCompleted: true,
             model: 'intercepted synthetic responses; no paid model calls',
         }),
     );
