@@ -66,7 +66,7 @@ export function initNovelUI(host) {
     let settings = {};
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.1-role-batch.5';
+    const pluginVersion = '1.9.1';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -458,7 +458,7 @@ export function initNovelUI(host) {
             if (useTagExtract) {
                 previewText = extractTagContents(rawContent, extractTags, settings.tagSeparator);
                 if (!previewText) {
-                    html += `<div class="nag-preview-warning"><b>⚠️ 未找到标签</b> [${extractTags.join(', ')}]</div>`;
+                    html += `<div class="nag-preview-warning"><b>⚠️ 未找到标签</b> [${escapeHtml(extractTags.join(', '))}]</div>`;
                     $('#nag-preview-content').html(html);
                     return;
                 }
@@ -472,8 +472,8 @@ export function initNovelUI(host) {
 
             if (previewText) {
                 const actions = [];
-                if (useTagExtract) actions.push(`提取标签 [${extractTags.join(', ')}]`);
-                if (useTagExclude) actions.push(`移除标签 [${excludeTags.join(', ')}]`);
+                if (useTagExtract) actions.push(`提取标签 [${escapeHtml(extractTags.join(', '))}]`);
+                if (useTagExclude) actions.push(`移除标签 [${escapeHtml(excludeTags.join(', '))}]`);
                 html += `<div class="nag-preview-success"><b>✅ ${actions.join(' + ')}</b> (${previewText.length} 字)<div class="nag-preview-text">${escapeHtml(previewText.slice(0, 400))}</div></div>`;
             } else {
                 html += `<div class="nag-preview-warning"><b>⚠️ 移除标签后没有可预览内容</b></div>`;

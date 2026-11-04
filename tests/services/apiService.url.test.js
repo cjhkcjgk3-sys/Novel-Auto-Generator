@@ -86,8 +86,14 @@ describe('buildChatUrl', () => {
     });
 
     describe('协议前缀处理', () => {
-        it('缺失协议前缀补 http://', () => {
+        it('缺失协议前缀的本地服务补 http://', () => {
             expect(buildChatUrl('localhost:5000/v1')).toBe('http://localhost:5000/v1/chat/completions');
+            expect(buildChatUrl('127.0.0.1:5000/v1')).toBe('http://127.0.0.1:5000/v1/chat/completions');
+        });
+
+        it('缺失协议前缀的公网域名补 https://', () => {
+            expect(buildChatUrl('api.deepseek.com/v1')).toBe('https://api.deepseek.com/v1/chat/completions');
+            expect(buildModelsUrl('api.deepseek.com/v1')).toBe('https://api.deepseek.com/v1/models');
         });
 
         it('保留 https://', () => {

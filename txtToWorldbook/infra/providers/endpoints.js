@@ -1,3 +1,9 @@
+function ensureProtocol(url) {
+    if (/^https?:\/\//i.test(url)) return url;
+    const isLocal = /^(127\.0\.0\.1|localhost|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(url);
+    return (isLocal ? 'http://' : 'https://') + url;
+}
+
 /**
  * 构造 OpenAI 兼容 API 的 chat/completions 完整 URL
  *
@@ -21,9 +27,7 @@ export function buildChatUrl(endpoint) {
     if (!url.includes(suffix)) {
         url += suffix;
     }
-    if (!/^https?:\/\//i.test(url)) {
-        url = 'http://' + url;
-    }
+    url = ensureProtocol(url);
     return url;
 }
 
@@ -47,8 +51,6 @@ export function buildModelsUrl(endpoint) {
     } else if (!url.endsWith(modelsSuffix)) {
         url += modelsSuffix;
     }
-    if (!/^https?:\/\//i.test(url)) {
-        url = 'http://' + url;
-    }
+    url = ensureProtocol(url);
     return url;
 }

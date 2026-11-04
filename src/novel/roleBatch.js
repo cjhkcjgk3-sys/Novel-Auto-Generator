@@ -24,12 +24,16 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 batch.revision = (batch.revision || 0) + 1;
                 recovery?.write(batch);
             }
-            onChange();
         } catch {
             throw Object.assign(new Error('无法保存批量任务进度，已停止派发；请查看错误日志'), {
                 code: 'CHECKPOINT_FAILED',
                 uncertain: true,
             });
+        }
+        try {
+            onChange();
+        } catch (uiError) {
+            onError(uiError, { phase: 'checkpoint-ui' });
         }
     }
     function restore() {
