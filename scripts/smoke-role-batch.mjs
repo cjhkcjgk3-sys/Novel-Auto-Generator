@@ -15,6 +15,7 @@ try {
     const page = await browser.newPage();
     const requests = [];
     let emptyReplies = false;
+    let streamError = false;
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     for (const endpoint of ['text-models', 'text-workers'])
@@ -26,6 +27,13 @@ try {
     await page.route('**/api/backends/chat-completions/generate', (route) => {
         const body = route.request().postDataJSON();
         requests.push(body);
+        if (streamError) {
+            assert.equal(body.stream, true);
+            return route.fulfill({
+                contentType: 'text/event-stream',
+                body: `data: ${JSON.stringify({ error: { message: 'Synthetic stream failure before first token' } })}\n\n`,
+            });
+        }
         const text = emptyReplies
             ? ''
             : `[start]\n<character_design_complex>\nname: 测试角色${requests.length}\nversion: 1\nnotes: ROLE_RESULT_${requests.length}\n</character_design_complex>\n[end]`;
@@ -130,6 +138,7 @@ try {
     await page.locator('#custom_model_id').fill('fixture-model', { force: true });
     await page.locator('#custom_model_id').dispatchEvent('input');
     await page.locator('#api_button_openai').dispatchEvent('click');
+    await page.locator('#stream_toggle').check({ force: true });
     await page.evaluate(async () => {
         const c = SillyTavern.getContext();
         const message = {
@@ -153,8 +162,12 @@ try {
             node.value = value;
             node.dispatchEvent(new Event('change'));
         }
-        document.getElementById('nag-btn-start').click();
+        document.getElementById('nag-btn-reset').click();
     });
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+    );
+    await page.evaluate(() => document.getElementById('nag-btn-start').click());
     await page
         .waitForFunction(
             () => {
@@ -186,6 +199,7 @@ try {
     assert.equal(requests.length, 3);
     assert.equal(result.floors, 3);
     assert.equal(result.replies.length, 3);
+    assert.equal(result.prompt, '小助手生成角色：[[角色名]]。名字为[[角色名]]。');
     assert.ok(result.ui.includes('✅'));
     ['角色甲', '角色乙', '角色丙'].forEach((name, i) => {
         const prompt = JSON.stringify(requests[i].messages);
@@ -225,6 +239,36 @@ try {
     assert.equal(requests.length, 6, 'Exactly three empty attempts, no request for the next name');
     assert.equal(failure.index, 0);
     assert.equal(failure.items[1], undefined);
+    assert.equal(
+        await page.evaluate(() => window.SillyTavern.getContext().chat[2].swipes.length),
+        3,
+        'Empty attempts must not accumulate candidate pages',
+    );
+    emptyReplies = false;
+    streamError = true;
+    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+    );
+    await page.evaluate(() => document.getElementById('nag-btn-start').click());
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].isRunning,
+        null,
+        { timeout: 30000 },
+    );
+    const streamFailure = await page.evaluate(
+        () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+    );
+    assert.equal(streamFailure.index, 0, 'A swallowed streaming error must not count as a generated character');
+    assert.equal(streamFailure.items[0].failed, true);
+    assert.equal(streamFailure.items[1], undefined);
+    assert.equal(requests.length, 9, 'Three streaming failures must stop without processing the next name');
+    const afterFailure = await page.evaluate(() => ({
+        prompt: window.SillyTavern.getContext().chat[1].mes,
+        replies: window.SillyTavern.getContext().chat[2].swipes,
+    }));
+    assert.deepEqual(afterFailure.replies, result.replies, 'Failed retries must preserve all completed pages');
+    assert.equal(afterFailure.prompt, result.prompt);
     assert.deepEqual(errors, []);
     console.log(
         JSON.stringify({
@@ -236,6 +280,7 @@ try {
             cardAndWorldbookPreserved: true,
             previousResultsExcluded: true,
             emptyReplyAttempts: 3,
+            streamFailureAttempts: 3,
             model: 'intercepted synthetic responses; no paid model calls',
         }),
     );
