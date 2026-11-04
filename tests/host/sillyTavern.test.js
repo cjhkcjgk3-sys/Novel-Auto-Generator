@@ -1,9 +1,27 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createSillyTavernHost } from '../../src/host/sillyTavern.js';
+import { EventEmitter } from 'node:events';
+
+async function nativeSwipe(context, floor, swipeId) {
+    context.eventSource.emit(context.eventTypes.GENERATION_STARTED, 'swipe');
+    const reply = context.chat[floor];
+    reply.swipes ??= [reply.mes];
+    reply.swipe_info ??= [];
+    const previous = reply.swipe_id ?? 0;
+    reply.swipes[previous] = reply.mes;
+    reply.swipe_info[previous] = { extra: structuredClone(reply.extra || {}) };
+    reply.swipe_id = swipeId;
+    reply.mes = '';
+    reply.extra = {};
+    await context.generate('swipe');
+}
 
 afterEach(() => vi.useRealTimers());
 function setup() {
     const context = { chatId: 'a', characterId: 1, chat: [{ is_user: false, mes: '正文' }] };
+    context.eventSource = new EventEmitter();
+    context.eventTypes = { GENERATION_STOPPED: 'generation_stopped', GENERATION_STARTED: 'generation_started' };
+    context.stopGeneration = vi.fn(() => context.eventSource.emit(context.eventTypes.GENERATION_STOPPED));
     const button = { length: 1, prop: vi.fn(() => false), trigger: vi.fn() };
     const input = { 0: { value: '' }, length: 1, val: vi.fn(), trigger: vi.fn() };
     input.trigger.mockReturnValue(input);
@@ -15,6 +33,7 @@ function setup() {
         jquery: (selector) => (selector === '#send_but' ? button : input),
         extensionSettings: settings,
         saveSettings: save,
+        swipeReply: (floor, swipeId) => nativeSwipe(context, floor, swipeId),
     });
     return { host, context, button, input, settings, save };
 }
@@ -80,6 +99,7 @@ function batchSetup(existing = true) {
         context.chat.push({ mes: '旧成品', is_user: false, swipe_id: 0, swipes: ['旧成品'], extra: { note: '保留' } });
     const inputs = [];
     context.generate = vi.fn(async (type) => {
+        context.eventSource.emit(context.eventTypes.GENERATION_STARTED, type);
         inputs.push({ type, history: structuredClone(type === 'swipe' ? context.chat.slice(0, -1) : context.chat) });
         const prompt = context.chat[1].mes;
         if (type === 'regenerate')
@@ -136,17 +156,14 @@ it('binds an empty newly created reply after failure so a retry can use the same
 it('bounds a hanging host request, aborts it and reports uncertainty', async () => {
     vi.useFakeTimers();
     const { host, context } = batchSetup();
-    let signal;
-    context.generate.mockImplementation((_type, options) => {
-        signal = options.signal;
-        return new Promise(() => {});
-    });
+    context.generate.mockImplementation(() => new Promise(() => {}));
     const task = host
         .generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {}, timeoutMs: 50 })
         .catch((error) => error);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(await task).toMatchObject({ uncertain: true });
-    expect(signal.aborted).toBe(true);
+    expect(context.stopGeneration).toHaveBeenCalledOnce();
+    expect(context.generate).toHaveBeenCalledWith('swipe');
     expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -203,6 +220,7 @@ it('waits for the host to become idle even if generate resolves before streaming
         getContext: () => context,
         getDocument: () => ({ querySelector: () => ({}) }),
         getStyle: () => ({ display: generating ? 'flex' : 'none' }),
+        swipeReply: (floor, swipeId) => nativeSwipe(context, floor, swipeId),
     });
     context.generate.mockImplementation(async () => {
         generating = true;
@@ -234,4 +252,37 @@ it('preserves partial text when the host explicitly reports an interrupted strea
         truncated: true,
     });
     expect(context.chat[2].swipes).toEqual(['旧成品', '已经返回的半截正文']);
+});
+
+it('ends the waiting task immediately when the user stops generation in Tavern', async () => {
+    vi.useFakeTimers();
+    const { host, context } = batchSetup();
+    context.generate.mockImplementation(() => new Promise(() => {}));
+    const task = host.generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {} }).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(10);
+    context.stopGeneration();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await task).toMatchObject({ code: 'USER_STOPPED', uncertain: true });
+    expect(context.eventSource.listenerCount(context.eventTypes.GENERATION_STOPPED)).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => host.prepareRoleBatch()).toThrow('仍在退出');
+});
+
+it('does not accept existing content when native swipe never starts a generation', async () => {
+    const { context } = batchSetup();
+    const host = createSillyTavernHost({
+        getContext: () => context,
+        getDocument: () => ({ querySelector: () => null }),
+        swipeReply: async () => {},
+    });
+    await expect(
+        host.generateRoleReply(host.prepareRoleBatch(), '生成 安柏', { assertCurrent() {} }),
+    ).rejects.toMatchObject({
+        code: 'NOT_STARTED',
+        phase: 'dispatch',
+        expectedSwipe: 1,
+        actualSwipe: 0,
+    });
+    expect(context.chat[2].mes).toBe('旧成品');
+    expect(context.generate).not.toHaveBeenCalled();
 });

@@ -13,7 +13,9 @@ export function createSillyTavernHost({
     jquery = (...args) => globalThis.jQuery(...args),
     extensionSettings = {},
     saveSettings = () => {},
+    swipeReply = null,
 } = {}) {
+    let roleGeneration = null;
     function getChat() {
         try {
             const chat = getContext()?.chat;
@@ -56,12 +58,15 @@ export function createSillyTavernHost({
     }
 
     function prepareRoleBatch() {
+        if (roleGeneration) throw new Error('上一轮酒馆生成仍在退出，请稍后再开始');
         const context = getContext();
         if (context?.groupId != null) throw new Error('请在写卡助手的单角色聊天中使用批量模式');
         if (
-            ![context?.generate, context?.saveChat, context?.updateMessageBlock].every((fn) => typeof fn === 'function')
+            ![context?.generate, context?.saveChat, context?.updateMessageBlock, swipeReply].every(
+                (fn) => typeof fn === 'function',
+            )
         )
-            throw new Error('当前酒馆缺少生成或消息更新接口，请更新酒馆后重试');
+            throw new Error('当前酒馆缺少原生翻页、生成或消息更新接口，请提供酒馆版本以便适配');
         const chat = getChat();
         const promptFloor = chat?.findLastIndex((message) => message?.is_user) ?? -1;
         const tail = chat?.slice(promptFloor + 1) || [];
@@ -72,6 +77,7 @@ export function createSillyTavernHost({
 
     async function restoreRoleTemplate(batch) {
         if (!batch || snapshot().identity !== batch.identity) return;
+        if (roleGeneration) throw new Error('上一轮酒馆生成仍在退出，请稍后重置');
         if (snapshot().generating === true) throw new Error('请等待酒馆生成停止后再重置');
         const context = getContext(),
             prompt = getChat()?.[batch.promptFloor];
@@ -90,7 +96,7 @@ export function createSillyTavernHost({
             messages = getChat();
         const prompt = messages?.[batch.promptFloor];
         const expectedLength = batch.resultFloor == null ? batch.promptFloor + 1 : batch.resultFloor + 1;
-        if (!prompt?.is_user || messages.length !== expectedLength || snapshot().generating === true)
+        if (roleGeneration || !prompt?.is_user || messages.length !== expectedLength || snapshot().generating === true)
             throw Object.assign(new Error('聊天结构或生成状态已变化，批量任务已停止'), { uncertain: true });
         prompt.mes = text;
         if (Array.isArray(prompt.swipes)) prompt.swipes[prompt.swipe_id ?? 0] = text;
@@ -100,24 +106,7 @@ export function createSillyTavernHost({
         assertCurrent();
         let reply = batch.resultFloor == null ? null : messages[batch.resultFloor];
         const previousReply = reply ? structuredClone(reply) : null;
-        let expectedSwipe = 0;
-        if (reply) {
-            // Match native swipe preparation: archive the selected page, then select a new slot.
-            reply.swipes ??= [reply.mes];
-            reply.swipe_info ??= [];
-            const previous = reply.swipe_id ?? 0;
-            reply.swipes[previous] = reply.mes;
-            reply.swipe_info[previous] = {
-                send_date: reply.send_date,
-                gen_started: reply.gen_started,
-                gen_finished: reply.gen_finished,
-                extra: structuredClone(reply.extra || {}),
-            };
-            expectedSwipe = reply.swipes.length;
-            reply.swipe_id = expectedSwipe;
-            reply.mes = '';
-            reply.extra = {};
-        }
+        const expectedSwipe = reply ? Math.max(1, reply.swipes?.length || 0) : 0;
         async function discardEmptyReply() {
             if (!previousReply) return;
             for (const key of Object.keys(reply)) delete reply[key];
@@ -126,15 +115,30 @@ export function createSillyTavernHost({
             await context.saveChat();
         }
         const controller = new AbortController();
-        const abort = () => controller.abort();
+        const abort = () => {
+            controller.abort();
+            if (snapshot().identity === identity) context.stopGeneration?.();
+        };
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted) abort();
         let timeout, watch;
         let failure;
+        let rejectStopped;
+        const onUserStop = () => {
+            if (failure) return;
+            failure = Object.assign(new Error('酒馆生成已手动停止，批量任务已结束；重置后可重新开始'), {
+                uncertain: true,
+                code: 'USER_STOPPED',
+            });
+            controller.abort();
+            rejectStopped?.(failure);
+        };
         const stopped = new Promise((_, reject) => {
+            rejectStopped = reject;
             const fail = (error) => {
                 failure = error;
                 controller.abort();
+                if (snapshot().identity === identity) context.stopGeneration?.();
                 reject(error);
             };
             timeout = setTimeout(
@@ -149,33 +153,67 @@ export function createSillyTavernHost({
                 }
             }, 100);
         });
+        const stopEvent = context.eventTypes?.GENERATION_STOPPED;
+        const startEvent = context.eventTypes?.GENERATION_STARTED;
+        let started = !startEvent;
+        const onStarted = (type) => {
+            if (type === (reply ? 'swipe' : 'regenerate')) started = true;
+        };
+        if (stopEvent) context.eventSource?.on(stopEvent, onUserStop);
+        if (startEvent) context.eventSource?.on(startEvent, onStarted);
         try {
             // regenerate on a user tail neither adds a user message nor consumes the input draft.
             // swipe excludes the result floor while retaining presets, card fields and worldbook rules.
-            await Promise.race([
-                (async () => {
-                    await context.generate(reply ? 'swipe' : 'regenerate', { signal: controller.signal });
-                    // Some host integrations return before their streaming task has settled.
-                    while (snapshot().generating === true) {
-                        assertCurrent();
-                        await abortableDelay(100, controller.signal);
-                    }
-                })(),
-                stopped,
-            ]);
+            const generation = (async () => {
+                assertCurrent();
+                // Native swipe owns page selection, UI updates and MESSAGE_SWIPED notifications.
+                // Do not pass our signal: core uses its presence to reuse an older abort controller.
+                if (reply) await swipeReply(batch.resultFloor, expectedSwipe);
+                else await context.generate('regenerate');
+                // Some host integrations return before their streaming task has settled.
+                while (snapshot().generating === true) {
+                    assertCurrent();
+                    await abortableDelay(100, controller.signal);
+                }
+            })();
+            roleGeneration = generation;
+            const release = () => {
+                if (roleGeneration === generation) roleGeneration = null;
+            };
+            generation.then(release, release);
+            await Promise.race([generation, stopped]);
             if (failure) throw failure;
             assertCurrent();
+            if (!started)
+                throw Object.assign(new Error('酒馆没有启动本轮生成，请下载错误日志'), {
+                    code: 'NOT_STARTED',
+                    phase: 'dispatch',
+                    expectedSwipe,
+                    actualSwipe: reply?.swipe_id,
+                });
             if (batch.resultFloor == null && messages.length === batch.promptFloor + 2)
                 batch.resultFloor = batch.promptFloor + 1;
             reply = messages[batch.resultFloor];
             if (!reply || reply.is_user) return { text: '', swipe: null, truncated: false };
             if (messages.length !== batch.resultFloor + 1 || reply.swipe_id !== expectedSwipe)
-                throw Object.assign(new Error('回复楼层或候选页已变化，请手动核对结果'), { uncertain: true });
+                throw Object.assign(new Error('酒馆未切换到本轮候选页，已停止；请下载错误日志'), {
+                    uncertain: true,
+                    phase: 'select-swipe',
+                    expectedSwipe,
+                    actualSwipe: reply.swipe_id,
+                });
             // Core streaming failures can resolve normally and leave the initial "..." in chat.
             const text = String(reply.mes || '');
             if (!text.trim() || text.trim() === '...') {
+                const notice = getDocument().querySelector('#toast-container .toast-error .toast-message')?.textContent;
+                const error = Object.assign(new Error(notice || '酒馆没有返回正文'), {
+                    code: 'EMPTY_REPLY',
+                    phase: 'read-reply',
+                    expectedSwipe,
+                    actualSwipe: reply.swipe_id,
+                });
                 await discardEmptyReply();
-                return { text: '', swipe: null, truncated: false };
+                return { text: '', swipe: null, truncated: false, error };
             }
             await context.saveChat();
             return { text, swipe: reply.swipe_id, truncated: !!getContext()?.streamingProcessor?.isStopped };
@@ -199,6 +237,10 @@ export function createSillyTavernHost({
             clearTimeout(timeout);
             clearInterval(watch);
             signal?.removeEventListener('abort', abort);
+            if (stopEvent) context.eventSource?.removeListener(stopEvent, onUserStop);
+            if (startEvent) context.eventSource?.removeListener(startEvent, onStarted);
+            // Let core finish its swipe cleanup before reset can dispatch another generation.
+            if (roleGeneration) await Promise.race([roleGeneration.catch(() => {}), abortableDelay(1000)]);
         }
     }
     return {

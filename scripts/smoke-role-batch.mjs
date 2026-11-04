@@ -13,10 +13,28 @@ if (process.env.ST_CHROMIUM_MODULE) {
 const browser = await chromium.launch(launch);
 try {
     const page = await browser.newPage();
+    page.setDefaultTimeout(15000);
     const requests = [];
+    const requestPages = [];
     let emptyReplies = false;
     let streamError = false;
+    let holdResponse = false;
+    let releaseResponse;
+    let onHeld;
     const errors = [];
+    let initializing = true;
+    page.on('console', async (message) => {
+        if (initializing && message.type() === 'error') {
+            const values = await Promise.all(
+                message
+                    .args()
+                    .map((arg) =>
+                        arg.evaluate((value) => (value instanceof Error ? value.stack : String(value))).catch(() => ''),
+                    ),
+            );
+            console.error('Host initialization:', values.join(' '));
+        }
+    });
     page.on('pageerror', (error) => errors.push(error.message));
     for (const endpoint of ['text-models', 'text-workers'])
         await page.route(`**/api/horde/${endpoint}`, (route) => route.fulfill({ json: [] }));
@@ -24,9 +42,23 @@ try {
     await page.route('**/api/backends/chat-completions/status', (route) =>
         route.fulfill({ json: { data: [{ id: 'fixture-model' }] } }),
     );
-    await page.route('**/api/backends/chat-completions/generate', (route) => {
+    await page.route('**/api/backends/chat-completions/generate', async (route) => {
         const body = route.request().postDataJSON();
         requests.push(body);
+        requestPages.push(
+            await page.evaluate(() => ({
+                swipe: window.SillyTavern.getContext().chat.at(-1)?.swipe_id,
+                counter: document
+                    .querySelector('#chat .last_mes .swipes-counter')
+                    ?.textContent?.replace(/[\s\u200B-\u200D\uFEFF]/g, ''),
+            })),
+        );
+        if (holdResponse) {
+            await new Promise((resolve) => {
+                releaseResponse = resolve;
+                onHeld?.();
+            });
+        }
         if (streamError) {
             assert.equal(body.stream, true);
             return route.fulfill({
@@ -131,6 +163,13 @@ try {
     assert.ok(index >= 0, 'Imported writing assistant is available');
     await page.locator('#CharID' + index).dispatchEvent('click');
     await page.waitForFunction(() => SillyTavern.getContext().chat.length > 0);
+    await page
+        .waitForFunction(() => document.getElementById('nag-set-mode'))
+        .catch((error) => {
+            console.error(JSON.stringify({ initializationErrors: errors }));
+            throw error;
+        });
+    initializing = false;
     await page.locator('#main_api').selectOption('openai', { force: true });
     await page.locator('#chat_completion_source').selectOption('custom', { force: true });
     await page.locator('#custom_api_url_text').fill('http://127.0.0.1:18080/v1', { force: true });
@@ -167,12 +206,15 @@ try {
     await page.waitForFunction(
         () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
     );
+    // A previous manual stop must not leave the next generation using an aborted core controller.
+    await page.locator('#nag-btn-clear-errors').dispatchEvent('click');
+    await page.evaluate(() => window.SillyTavern.getContext().stopGeneration());
     await page.evaluate(() => document.getElementById('nag-btn-start').click());
     await page
         .waitForFunction(
             () => {
                 const settings = SillyTavern.getContext().extensionSettings['novel-auto-generator'];
-                return settings.roleBatch?.index === 3 && !settings.isRunning;
+                return !settings.isRunning;
             },
             null,
             { timeout: 60000 },
@@ -197,6 +239,8 @@ try {
         };
     });
     assert.equal(requests.length, 3);
+    assert.equal(requestPages[1].swipe, 1);
+    assert.ok(requestPages[1].counter?.startsWith('2/'), JSON.stringify(requestPages));
     assert.equal(result.floors, 3);
     assert.equal(result.replies.length, 3);
     assert.equal(result.prompt, '小助手生成角色：[[角色名]]。名字为[[角色名]]。');
@@ -269,6 +313,72 @@ try {
     }));
     assert.deepEqual(afterFailure.replies, result.replies, 'Failed retries must preserve all completed pages');
     assert.equal(afterFailure.prompt, result.prompt);
+    const errorRecords = await page.evaluate(
+        () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].errorLog,
+    );
+    assert.equal(errorRecords.length, 6, 'Only the six failed attempts are recorded');
+    assert.ok(errorRecords.every((entry) => entry.phase && entry.attempt && entry.roleIndex === 1));
+    assert.ok(!JSON.stringify(errorRecords).includes('ROLE_RESULT_'));
+    const downloaded = page.waitForEvent('download');
+    await page.locator('#nag-btn-error-log').dispatchEvent('click');
+    const download = await downloaded;
+    const downloadedLog = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+    assert.equal(downloadedLog.errors.length, 6);
+    assert.equal(downloadedLog.pluginVersion, '1.9.1-role-batch.3');
+    streamError = false;
+    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+    );
+    holdResponse = true;
+    const held = new Promise((resolve) => {
+        onHeld = resolve;
+    });
+    await page.evaluate(() => document.getElementById('nag-btn-start').click());
+    await Promise.race([
+        held,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Stop-test request did not start')), 15000)),
+    ]);
+    await page.locator('#mes_stop').dispatchEvent('click');
+    holdResponse = false;
+    releaseResponse();
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].isRunning,
+    );
+    await page.evaluate(() => document.getElementById('nag-btn-reset').click());
+    await page.waitForFunction(
+        () => !window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch,
+    );
+    await page.evaluate(() => {
+        for (const [id, value] of Object.entries({ 'nag-set-total': '1', 'nag-set-prompt': '停止后重新开始' })) {
+            const element = document.getElementById(id);
+            element.value = value;
+            element.dispatchEvent(new Event('change'));
+        }
+        document.getElementById('nag-btn-start').click();
+    });
+    await page.waitForFunction(() => {
+        const settings = window.SillyTavern.getContext().extensionSettings['novel-auto-generator'];
+        return !settings.isRunning;
+    });
+    const restarted = await page.evaluate(
+        () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'],
+    );
+    assert.equal(restarted.roleBatch.index, 1, 'Manual stop, reset and start must dispatch a fresh request');
+    assert.equal(requests.length, 11);
+    assert.ok(JSON.stringify(requests[10].messages).includes('停止后重新开始'));
+    const restartedReplies = await page.evaluate(() => window.SillyTavern.getContext().chat[2].swipes);
+    assert.deepEqual(restartedReplies.slice(0, 3), result.replies);
+    assert.ok(restartedReplies.at(-1).includes('ROLE_RESULT_11'));
+    assert.equal(restarted.errorLog.length, 6, 'Manual stopping and successful restarting are not errors');
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForFunction(() => document.getElementById('nag-btn-error-log'));
+    assert.equal(
+        await page.evaluate(
+            () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].errorLog.length,
+        ),
+        6,
+    );
     assert.deepEqual(errors, []);
     console.log(
         JSON.stringify({
@@ -281,6 +391,9 @@ try {
             previousResultsExcluded: true,
             emptyReplyAttempts: 3,
             streamFailureAttempts: 3,
+            manualStopRestart: true,
+            nativeSwipeCounterVerified: true,
+            errorLogDownload: true,
             model: 'intercepted synthetic responses; no paid model calls',
         }),
     );

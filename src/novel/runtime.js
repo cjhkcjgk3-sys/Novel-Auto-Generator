@@ -2,6 +2,7 @@ import { createNovelRecoveryStore } from './recoveryStore.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
+import { createErrorRecord } from '../../txtToWorldbook/core/logger.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
 
 let instance = null;
@@ -19,6 +20,7 @@ export function initNovelUI(host) {
         generationMode: 'novel',
         roleNames: '',
         roleBatch: null,
+        errorLog: [],
         isRunning: false,
         isPaused: false,
 
@@ -62,6 +64,20 @@ export function initNovelUI(host) {
 
     let settings = {};
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
+    let recordedStatErrors = 0;
+    const pluginVersion = '1.9.1-role-batch.3';
+    function recordError(error, details = {}) {
+        if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
+        const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
+        settings.errorLog = [...entries, createErrorRecord(error, { mode: settings.generationMode, ...details })].slice(
+            -100,
+        );
+        try {
+            saveSettings();
+        } catch {
+            /* Logging must not interrupt generation. */
+        }
+    }
 
     // ============================================
     // 工具函数
@@ -531,6 +547,9 @@ export function initNovelUI(host) {
         snapshot: host.snapshot,
         send: host.send,
         onChange: () => {
+            for (const entry of generationStats.errors.slice(recordedStatErrors))
+                recordError(new Error(entry.error), { phase: 'auto-novel', roleIndex: entry.chapter });
+            recordedStatErrors = generationStats.errors.length;
             saveSettings();
             updateUI();
         },
@@ -538,11 +557,13 @@ export function initNovelUI(host) {
         exportNovel: (...args) => exportNovel(...args),
         onStats: (stats) => {
             generationStats = stats;
+            recordedStatErrors = 0;
         },
     });
     const roleRunner = createRoleBatchRunner({
         getSettings: () => settings,
         host,
+        onError: recordError,
         onChange: () => {
             saveSettings();
             updateUI();
@@ -768,6 +789,7 @@ export function initNovelUI(host) {
                         <button id="nag-btn-stop" class="menu_button" disabled>⏹️ 停止</button>
                     </div>
                     <div class="nag-btn-row"><button id="nag-btn-reset" class="menu_button">🔄 重置</button></div>
+                    <div class="nag-btn-row"><button id="nag-btn-error-log" class="menu_button">下载错误日志</button><button id="nag-btn-clear-errors" class="menu_button">清空错误日志</button></div>
                 </div>
 
                 <!-- 📝 生成设置模块 -->
@@ -1003,6 +1025,20 @@ export function initNovelUI(host) {
         $('#nag-btn-resume').on('click', resumeGeneration);
         $('#nag-btn-stop').on('click', stopGeneration);
         $('#nag-btn-reset').on('click', resetProgress);
+        $('#nag-btn-error-log').on('click', () => {
+            const errors = settings.errorLog || [];
+            if (!errors.length) return toastr.info('暂无错误日志');
+            downloadFile(
+                JSON.stringify({ pluginVersion, errors }, null, 2),
+                `generation-errors-${Date.now()}.json`,
+                'application/json',
+            );
+        });
+        $('#nag-btn-clear-errors').on('click', () => {
+            settings.errorLog = [];
+            saveSettings();
+            toastr.info('错误日志已清空');
+        });
         $('#nag-btn-export-txt').on('click', () => exportNovel(false));
         $('#nag-btn-export-json').on('click', () => exportAsJSON(false));
         $('#nag-btn-refresh-floors').on('click', () => $('#nag-total-floors').text(getTotalFloors()));
