@@ -178,3 +178,60 @@ it('restores the placeholder on explicit reset without deleting generated pages'
     await host.restoreRoleTemplate(batch);
     expect(context.chat[1].mes).toBe('另一聊天');
 });
+
+it('does not accept a swallowed stream error or retain its temporary swipe', async () => {
+    const { host, context } = batchSetup();
+    const original = structuredClone(context.chat[2]);
+    context.generate.mockImplementation(async () => {
+        const reply = context.chat[2];
+        reply.swipes.push('...');
+        reply.mes = '...';
+        context.streamingProcessor = { isStopped: true, isFinished: false };
+    });
+    const batch = host.prepareRoleBatch();
+    for (let attempt = 0; attempt < 3; attempt++) {
+        expect(await host.generateRoleReply(batch, '生成 琴', { assertCurrent() {} })).toMatchObject({ text: '' });
+        expect(context.chat[2]).toEqual(original);
+    }
+});
+
+it('waits for the host to become idle even if generate resolves before streaming ends', async () => {
+    vi.useFakeTimers();
+    const { context } = batchSetup();
+    let generating = false;
+    const host = createSillyTavernHost({
+        getContext: () => context,
+        getDocument: () => ({ querySelector: () => ({}) }),
+        getStyle: () => ({ display: generating ? 'flex' : 'none' }),
+    });
+    context.generate.mockImplementation(async () => {
+        generating = true;
+        context.chat[2].mes = '...';
+        setTimeout(() => {
+            context.chat[2].mes = '完整正文';
+            context.chat[2].swipes.push('完整正文');
+            generating = false;
+        }, 500);
+    });
+    let settled = false;
+    const task = host.generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {} });
+    task.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await task).toMatchObject({ text: '完整正文' });
+});
+
+it('preserves partial text when the host explicitly reports an interrupted stream', async () => {
+    const { host, context } = batchSetup();
+    context.generate.mockImplementation(async () => {
+        context.chat[2].mes = '已经返回的半截正文';
+        context.chat[2].swipes.push('已经返回的半截正文');
+        context.streamingProcessor = { isStopped: true, isFinished: false };
+    });
+    expect(await host.generateRoleReply(host.prepareRoleBatch(), '生成 琴', { assertCurrent() {} })).toMatchObject({
+        text: '已经返回的半截正文',
+        truncated: true,
+    });
+    expect(context.chat[2].swipes).toEqual(['旧成品', '已经返回的半截正文']);
+});

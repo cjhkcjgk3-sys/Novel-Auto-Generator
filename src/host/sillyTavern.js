@@ -85,6 +85,7 @@ export function createSillyTavernHost({
 
     async function generateRoleReply(batch, text, { signal, assertCurrent, timeoutMs = 600000 }) {
         assertCurrent();
+        const identity = snapshot().identity;
         const context = getContext(),
             messages = getChat();
         const prompt = messages?.[batch.promptFloor];
@@ -98,6 +99,7 @@ export function createSillyTavernHost({
         await context.saveChat();
         assertCurrent();
         let reply = batch.resultFloor == null ? null : messages[batch.resultFloor];
+        const previousReply = reply ? structuredClone(reply) : null;
         let expectedSwipe = 0;
         if (reply) {
             // Match native swipe preparation: archive the selected page, then select a new slot.
@@ -115,6 +117,13 @@ export function createSillyTavernHost({
             reply.swipe_id = expectedSwipe;
             reply.mes = '';
             reply.extra = {};
+        }
+        async function discardEmptyReply() {
+            if (!previousReply) return;
+            for (const key of Object.keys(reply)) delete reply[key];
+            Object.assign(reply, previousReply);
+            context.updateMessageBlock(batch.resultFloor, reply);
+            await context.saveChat();
         }
         const controller = new AbortController();
         const abort = () => controller.abort();
@@ -144,7 +153,14 @@ export function createSillyTavernHost({
             // regenerate on a user tail neither adds a user message nor consumes the input draft.
             // swipe excludes the result floor while retaining presets, card fields and worldbook rules.
             await Promise.race([
-                context.generate(reply ? 'swipe' : 'regenerate', { signal: controller.signal }),
+                (async () => {
+                    await context.generate(reply ? 'swipe' : 'regenerate', { signal: controller.signal });
+                    // Some host integrations return before their streaming task has settled.
+                    while (snapshot().generating === true) {
+                        assertCurrent();
+                        await abortableDelay(100, controller.signal);
+                    }
+                })(),
                 stopped,
             ]);
             if (failure) throw failure;
@@ -155,14 +171,29 @@ export function createSillyTavernHost({
             if (!reply || reply.is_user) return { text: '', swipe: null, truncated: false };
             if (messages.length !== batch.resultFloor + 1 || reply.swipe_id !== expectedSwipe)
                 throw Object.assign(new Error('回复楼层或候选页已变化，请手动核对结果'), { uncertain: true });
+            // Core streaming failures can resolve normally and leave the initial "..." in chat.
+            const text = String(reply.mes || '');
+            if (!text.trim() || text.trim() === '...') {
+                await discardEmptyReply();
+                return { text: '', swipe: null, truncated: false };
+            }
             await context.saveChat();
-            return { text: reply.mes || '', swipe: reply.swipe_id, truncated: false };
+            return { text, swipe: reply.swipe_id, truncated: !!getContext()?.streamingProcessor?.isStopped };
         } catch (error) {
             if (failure) throw failure;
             if (batch.resultFloor == null && messages.length === batch.promptFloor + 2 && !messages.at(-1)?.is_user)
                 batch.resultFloor = batch.promptFloor + 1;
             reply = messages[batch.resultFloor];
             if (error.code === 'TOKEN_LIMIT') return { text: reply?.mes || '', swipe: expectedSwipe, truncated: true };
+            if (
+                !error.uncertain &&
+                !signal?.aborted &&
+                snapshot().identity === identity &&
+                snapshot().generating !== true &&
+                messages === getChat() &&
+                reply?.swipe_id === expectedSwipe
+            )
+                await discardEmptyReply();
             throw error;
         } finally {
             clearTimeout(timeout);

@@ -14,6 +14,7 @@ function setup(replies = [{ text: '结果' }]) {
             if (result instanceof Error) throw result;
             return result;
         }),
+        restoreRoleTemplate: vi.fn(async () => {}),
     };
     const notify = vi.fn();
     const runner = createRoleBatchRunner({
@@ -41,6 +42,7 @@ it('substitutes all placeholders in order, preserves duplicate names and caps th
     ]);
     expect(settings.roleBatch.index).toBe(2);
     expect(settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
+    expect(host.restoreRoleTemplate).toHaveBeenCalledWith(settings.roleBatch);
     expect(parseRoleNames(' A\r\n\nB ')).toEqual(['A', 'B']);
 });
 
@@ -84,6 +86,7 @@ it('marks failure and stops the batch after exactly three empty replies', async 
     expect(settings.roleBatch.items[0]).toMatchObject({ name: '琴', failed: true });
     expect(settings.roleBatch.items[1]).toBeUndefined();
     expect(settings.isRunning).toBe(false);
+    expect(host.restoreRoleTemplate).toHaveBeenCalledWith(settings.roleBatch);
 });
 
 it('marks explicit truncation and continues without retrying that character', async () => {
@@ -97,12 +100,24 @@ it('marks explicit truncation and continues without retrying that character', as
     expect(settings.roleBatch.items.map((item) => item.failed)).toEqual([true, false]);
 });
 
+it('does not advance for a truncation signal with no returned text', async () => {
+    vi.useFakeTimers();
+    const { settings, host, runner } = setup([{ text: '', truncated: true }]);
+    const task = runner.start();
+    await vi.runAllTimersAsync();
+    await task;
+    expect(host.generateRoleReply).toHaveBeenCalledTimes(3);
+    expect(settings.roleBatch.index).toBe(0);
+    expect(settings.roleBatch.items[1]).toBeUndefined();
+});
+
 it('keeps uncertain requests pending and does not blindly resend on restart', async () => {
     const { settings, host, runner } = setup([Object.assign(new Error('timeout'), { uncertain: true })]);
     await runner.start();
     await runner.start();
     expect(host.generateRoleReply).toHaveBeenCalledTimes(1);
     expect(settings.roleBatch.pending).toBe(true);
+    expect(host.restoreRoleTemplate).not.toHaveBeenCalled();
 });
 
 it('pauses between roles and resumes without repeating completed roles', async () => {

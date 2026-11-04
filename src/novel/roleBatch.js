@@ -85,7 +85,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                         );
                         assertCurrent(run);
                         batch.pending = false;
-                        if (!reply.text?.trim() && !reply.truncated) throw new Error('没有返回内容');
+                        if (!reply.text?.trim()) throw new Error('没有返回内容');
                         batch.items[batch.index] = {
                             name,
                             processed: true,
@@ -121,6 +121,14 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 notify('warning', error.message);
             }
         } finally {
+            const batch = state();
+            if (!batch?.pending && host.snapshot().identity === run.identity) {
+                try {
+                    await host.restoreRoleTemplate?.(batch);
+                } catch (error) {
+                    notify('warning', `恢复提示词模板失败：${error.message}`);
+                }
+            }
             const item = state()?.items[state().index];
             if (item?.processing) item.processing = false;
             active = null;
