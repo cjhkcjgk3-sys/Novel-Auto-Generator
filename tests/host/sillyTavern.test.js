@@ -353,6 +353,46 @@ it('does not adopt partial or unmarked text and repairs moved or deleted complet
     expect(batch.items[0].processed).toBe(false);
 });
 
+it('retains a failed result when an old complete receipt has text that fails the same validation used at generation', async () => {
+    const { host, context } = batchSetup();
+    const invalid = '<card>有正文但没有闭合的角色卡。';
+    Object.assign(context.chat[2], {
+        mes: invalid,
+        swipes: [invalid],
+        swipe_info: [{ extra: { nag_role_batch: { taskId: 'task', itemId: 'role', status: 'complete' } } }],
+    });
+    const batch = {
+        ...host.prepareRoleBatch(),
+        identity: host.snapshot().identity,
+        id: 'task',
+        items: [{ id: 'role', name: '角色', processed: true, failed: true, swipe: 0 }],
+    };
+    await host.reconcileRoleBatch(batch, { minLength: 10, expectedClosingTags: ['</card>'] });
+    expect(batch.items[0].failed).toBe(true);
+});
+
+it('does not persist an invalid nonempty generation as a complete result', async () => {
+    const { host, context } = batchSetup(false);
+    const invalid = '<card>有正文但没有闭合的角色卡。';
+    const batch = {
+        ...host.prepareRoleBatch(),
+        identity: host.snapshot().identity,
+        id: 'task',
+        items: [{ id: 'role', name: '角色' }],
+        dispatch: { itemId: 'role', attemptId: 'attempt' },
+    };
+    context.generate.mockImplementation(async (type) => {
+        context.eventSource.emit(context.eventTypes.GENERATION_STARTED, type);
+        context.chat.push({ is_user: false, mes: invalid, swipe_id: 0, swipes: [invalid], extra: {} });
+        context.eventSource.emit(context.eventTypes.MESSAGE_RECEIVED, 2);
+    });
+    await host.generateRoleReply(batch, '生成 角色', {
+        assertCurrent() {},
+        validationOptions: { minLength: 10, expectedClosingTags: ['</card>'] },
+    });
+    expect(context.chat[2].swipe_info[0].extra.nag_role_batch.status).toBe('invalid');
+});
+
 it('keeps legacy completion bindings until the migrated chat receipts are saved', async () => {
     const { host, context } = batchSetup();
     const batch = {

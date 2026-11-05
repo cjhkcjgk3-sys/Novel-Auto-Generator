@@ -165,3 +165,20 @@ it('storage failure prevents dispatch, and corrupt recovery is not silently used
     await run(broken.create().runner);
     expect(broken.host.generateRoleReply).not.toHaveBeenCalled();
 });
+
+it('passes the same validation settings to generation, resume and reset', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const { runner, settings } = f.create({
+        roleNames: '角色',
+        totalChapters: 1,
+        minChapterLength: 10,
+        expectedClosingTags: ['</card>'],
+    });
+    await run(runner);
+    const validation = { minLength: 10, expectedClosingTags: ['</card>'] };
+    expect(f.host.reconcileRoleBatch).toHaveBeenCalledWith(settings.roleBatch, validation);
+    expect(f.host.generateRoleReply.mock.calls[0][2].validationOptions).toEqual(validation);
+    await runner.resetPending();
+    expect(f.host.reconcileRoleBatch).toHaveBeenLastCalledWith(settings.roleBatch, validation);
+});

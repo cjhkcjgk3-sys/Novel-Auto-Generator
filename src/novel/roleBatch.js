@@ -16,6 +16,10 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
     let preparing = false;
     let restored = false;
     const state = () => getSettings().roleBatch;
+    const validationOptions = () => ({
+        minLength: getSettings().minChapterLength,
+        expectedClosingTags: getSettings().expectedClosingTags,
+    });
     function checkpoint() {
         const batch = state();
         try {
@@ -108,7 +112,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 };
                 hydrateRoleBatch(batch);
             }
-            if (host.reconcileRoleBatch) await host.reconcileRoleBatch(batch);
+            if (host.reconcileRoleBatch) await host.reconcileRoleBatch(batch, validationOptions());
             else if (batch.pending) throw new Error('上一轮尚未确认结束，请先查看聊天结果');
             assertCurrent(run);
             updateRoleNames(batch, names);
@@ -165,6 +169,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                                 signal: run.controller.signal,
                                 assertCurrent: () => assertCurrent(run),
                                 timeoutMs: settings.replyTimeoutMs || 600000,
+                                validationOptions: validationOptions(),
                             },
                         );
                         assertCurrent(run);
@@ -292,7 +297,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
             try {
                 const batch = state();
                 if (batch && (!restart || batch.identity === host.snapshot().identity)) {
-                    if (!restart) await host.reconcileRoleBatch?.(batch);
+                    if (!restart) await host.reconcileRoleBatch?.(batch, validationOptions());
                     await host.restoreRoleTemplate?.(batch);
                 }
                 if (restart) {

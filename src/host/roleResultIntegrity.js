@@ -15,29 +15,29 @@ function changed(swipe) {
 /** Hash metadata lives with native swipe metadata; never duplicate the result bodies. */
 export async function verifyRoleResults(message, { seal = false, assertCurrent = () => {} } = {}) {
     if (!message) return false;
-    const selected = message.swipe_id ?? 0;
+    const selected = () => message.swipe_id ?? 0;
     const swipes = message.swipes || [message.mes];
     let modified = false;
     for (let index = 0; index < swipes.length; index++) {
-        const text = index === selected ? message.mes : swipes[index];
+        const readText = () => (index === selected() ? message.mes : (message.swipes || swipes)[index]);
+        const text = readText();
         const expected =
             message.swipe_info?.[index]?.extra?.[RESULT_HASH_KEY] ??
-            (index === selected ? message.extra?.[RESULT_HASH_KEY] : undefined);
+            (index === selected() ? message.extra?.[RESULT_HASH_KEY] : undefined);
         if (!expected && (!seal || typeof text !== 'string' || !text.trim() || text.trim() === '...')) continue;
         if (typeof text !== 'string') throw changed(index);
         const actual = await hashRoleResult(text);
         assertCurrent();
-        if ((index === selected ? message.mes : swipes[index]) !== text || (message.swipe_id ?? 0) !== selected)
-            throw changed(index);
+        if (readText() !== text) throw changed(index);
         if (expected && actual !== expected) throw changed(index);
-        if (index === selected && typeof swipes[index] === 'string' && swipes[index] !== text && expected)
-            throw changed(index);
+        const backing = (message.swipes || swipes)[index];
+        if (index === selected() && typeof backing === 'string' && backing !== text && expected) throw changed(index);
         if (!expected && seal) {
             message.swipe_info ??= [];
             message.swipe_info[index] ??= {};
             message.swipe_info[index].extra ??= {};
             message.swipe_info[index].extra[RESULT_HASH_KEY] = actual;
-            if (index === selected) {
+            if (index === selected()) {
                 message.extra ??= {};
                 message.extra[RESULT_HASH_KEY] = actual;
             }

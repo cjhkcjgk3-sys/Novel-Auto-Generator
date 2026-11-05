@@ -108,13 +108,16 @@ try {
                 body: `data: ${JSON.stringify({ error: { message: 'Synthetic stream failure before first token' } })}\n\n`,
             });
         }
-        const text = frontendReply
-            ? '```html\n<html><body>GENERATED_FRONTEND<script>window.parent.__nagResultRuns=(window.parent.__nagResultRuns||0)+1;</script>' +
-              '角色原文'.repeat(50) +
-              '</body></html>\n```'
-            : emptyReplies
-              ? ''
-              : `[start]\n<character_design_complex>\nname: 测试角色${requests.length}\nversion: 1\nnotes: ROLE_RESULT_${requests.length}\n</character_design_complex>\n[end]`;
+        const text =
+            frontendReply === 'incomplete'
+                ? '<card>这是有正文但缺少结束标签的角色卡，用来检查失败记录是否会被错误恢复为成功。'
+                : frontendReply
+                  ? '```html\n<html><body>GENERATED_FRONTEND<script>window.parent.__nagResultRuns=(window.parent.__nagResultRuns||0)+1;</script>' +
+                    '角色原文'.repeat(50) +
+                    '</body></html>\n```'
+                  : emptyReplies
+                    ? ''
+                    : `[start]\n<character_design_complex>\nname: 测试角色${requests.length}\nversion: 1\nnotes: ROLE_RESULT_${requests.length}\n</character_design_complex>\n[end]`;
         if (!body.stream)
             return route.fulfill({ json: { choices: [{ message: { content: text }, finish_reason: 'stop' }] } });
         return route.fulfill({
@@ -122,13 +125,44 @@ try {
             body: `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\ndata: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
         });
     });
-    await page.goto(url, { waitUntil: 'networkidle' });
+    const waitForHost = async () => {
+        await page.waitForFunction(() => window.SillyTavern?.getContext?.());
+        await page.evaluate(async () => {
+            const c = window.SillyTavern.getContext();
+            await new Promise((resolve, reject) => {
+                const finish = () => {
+                    clearTimeout(timer);
+                    resolve();
+                };
+                const timer = setTimeout(() => {
+                    c.eventSource.removeListener(c.eventTypes.APP_READY, finish);
+                    reject(new Error('Native APP_READY did not arrive'));
+                }, 15000);
+                c.eventSource.once(c.eventTypes.APP_READY, finish);
+            });
+        });
+    };
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.SillyTavern?.getContext?.());
+    await page.evaluate(() => {
+        const c = window.SillyTavern.getContext();
+        c.eventSource.once(c.eventTypes.APP_READY, () => {
+            window.__nagHostReady = true;
+        });
+    });
+    await page.waitForFunction(
+        () =>
+            window.__nagHostReady || [...document.querySelectorAll('.popup-input')].some((input) => input.offsetParent),
+    );
     const welcomeInput = page.locator('.popup-input:visible');
     if (await welcomeInput.count()) {
         await welcomeInput.last().fill('RoleBatchQA');
         await page.locator('.popup-button-ok:visible').last().click();
-        await page.waitForFunction(() => window.SillyTavern?.getContext().characters.length > 0);
     }
+    await waitForHost();
+    await page.evaluate(async () => {
+        await (await import('/script.js')).saveSettings();
+    });
     const name = `RoleBatchQA-${Date.now()}`;
     const card = process.env.SMOKE_CARD
         ? JSON.parse(fs.readFileSync(process.env.SMOKE_CARD, 'utf8'))
@@ -185,7 +219,7 @@ try {
     assert.ok(imported.ok(), await imported.text());
     const importedName = (await imported.json()).file_name;
     const avatar = importedName.endsWith('.png') ? importedName : importedName + '.png';
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page
         .waitForFunction(
             (avatar) => window.SillyTavern?.getContext().characters.some((c) => c.avatar === avatar),
@@ -203,6 +237,11 @@ try {
             throw error;
         });
     const showFixture = async () => {
+        await waitForHost();
+        await page.waitForFunction(
+            (avatar) => window.SillyTavern?.getContext?.().characters.some((character) => character.avatar === avatar),
+            avatar,
+        );
         const index = await page.evaluate(
             (avatar) => SillyTavern.getContext().characters.findIndex((c) => c.avatar === avatar),
             avatar,
@@ -215,29 +254,40 @@ try {
     const reopenChat = async () => {
         const index = await showFixture();
         await page.evaluate(async (index) => {
-            const c = window.SillyTavern.getContext();
-            await new Promise((resolve, reject) => {
-                const finish = () => {
-                    clearTimeout(timer);
-                    c.eventSource.removeListener(c.eventTypes.CHAT_LOADED, finish);
-                    resolve();
-                };
-                const timer = setTimeout(() => {
-                    c.eventSource.removeListener(c.eventTypes.CHAT_LOADED, finish);
-                    reject(new Error('Original chat did not finish loading'));
-                }, 15000);
-                c.eventSource.on(c.eventTypes.CHAT_LOADED, finish);
-                document.getElementById('CharID' + index).click();
-            });
+            const core = await import('/script.js');
+            await core.selectCharacterById(index);
         }, index);
-        await page.waitForFunction((avatar) => {
-            const c = window.SillyTavern.getContext();
-            return (
-                c.characters[c.characterId]?.avatar === avatar &&
-                c.chat.length === 3 &&
-                c.chat[1]?.mes.includes('小助手生成角色')
-            );
-        }, avatar);
+        await page
+            .waitForFunction((avatar) => {
+                const c = window.SillyTavern.getContext();
+                return (
+                    c.characters[c.characterId]?.avatar === avatar &&
+                    c.chat.length === 3 &&
+                    c.chat[1]?.mes.includes('小助手生成角色')
+                );
+            }, avatar)
+            .catch(async (error) => {
+                console.error(
+                    'Reopen fixture state:',
+                    await page.evaluate(() => {
+                        const c = window.SillyTavern.getContext();
+                        return {
+                            avatar: c.characters[c.characterId]?.avatar,
+                            floors: c.chat.length,
+                            types: c.chat.map((message) => !!message.is_user),
+                            hasExpectedPrompt: c.chat[1]?.mes.includes('小助手生成角色'),
+                            swipes: c.chat[2]?.swipes?.length,
+                            batch: c.extensionSettings['novel-auto-generator'].roleBatch?.items.map((item) => ({
+                                name: item.name,
+                                processed: item.processed,
+                                failed: item.failed,
+                            })),
+                            notices: document.querySelector('#toast-container')?.textContent,
+                        };
+                    }),
+                );
+                throw error;
+            });
     };
     await page.locator('#CharID' + (await showFixture())).dispatchEvent('click');
     await page.waitForFunction(() => SillyTavern.getContext().chat.length > 0);
@@ -416,7 +466,7 @@ try {
     const download = await downloaded;
     const downloadedLog = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
     assert.equal(downloadedLog.errors.length, 6);
-    assert.equal(downloadedLog.pluginVersion, '1.9.4');
+    assert.equal(downloadedLog.pluginVersion, '1.9.5');
     streamError = false;
     await restartBatch();
     holdResponse = true;
@@ -465,7 +515,7 @@ try {
         const core = await import('/script.js');
         await core.saveSettings();
     });
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('nag-btn-error-log'));
     assert.equal(
         await page.evaluate(
@@ -554,7 +604,7 @@ try {
         });
     const beforeReload = await recoverySnapshot();
     const navigation = page.waitForEvent('framenavigated', { predicate: (frame) => frame === page.mainFrame() });
-    const reload = page.reload({ waitUntil: 'networkidle' });
+    const reload = page.reload({ waitUntil: 'domcontentloaded' });
     await navigation;
     holdRole = null;
     releaseResponse();
@@ -601,7 +651,7 @@ try {
         batch.dispatch = { itemId: batch.items[0].id, attemptId: 'lost-checkpoint' };
         localStorage.setItem(key, JSON.stringify(batch));
     });
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('nag-btn-start'));
     await reopenChat();
     await connect();

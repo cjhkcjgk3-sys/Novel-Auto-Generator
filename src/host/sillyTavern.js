@@ -1,4 +1,5 @@
 import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
+import { isRoleCardTruncated } from '../novel/tagFilters.js';
 import { createRoleResultIsolation } from './resultIsolation.js';
 import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
 
@@ -94,7 +95,7 @@ export function createSillyTavernHost({
         await context.saveChat();
     }
 
-    async function reconcileRoleBatch(batch) {
+    async function reconcileRoleBatch(batch, validationOptions = {}) {
         if (roleGeneration || snapshot().generating === true) throw new Error('酒馆仍在处理上一轮，请稍后继续');
         if (snapshot().identity !== batch.identity) throw new Error('请返回原聊天后继续任务');
         const messages = getChat();
@@ -121,7 +122,8 @@ export function createSillyTavernHost({
                     receipt.itemId === item.id &&
                     receipt.status === 'complete' &&
                     !!text?.trim() &&
-                    text.trim() !== '...'
+                    text.trim() !== '...' &&
+                    !isRoleCardTruncated(text, validationOptions)
                 );
             });
             if (
@@ -130,7 +132,8 @@ export function createSillyTavernHost({
                 item.processed &&
                 !item.failed &&
                 Number.isInteger(item.swipe) &&
-                swipes[item.swipe]?.trim()
+                swipes[item.swipe]?.trim() &&
+                !isRoleCardTruncated(swipes[item.swipe], validationOptions)
             ) {
                 index = item.swipe;
                 reply.swipe_info ??= [];
@@ -162,7 +165,11 @@ export function createSillyTavernHost({
         batch.dispatch = null;
     }
 
-    async function generateRoleReply(batch, text, { signal, assertCurrent, timeoutMs = 600000 }) {
+    async function generateRoleReply(
+        batch,
+        text,
+        { signal, assertCurrent, timeoutMs = 600000, validationOptions = {} },
+    ) {
         assertCurrent();
         await roleIsolation?.prepare();
         assertCurrent();
@@ -268,7 +275,10 @@ export function createSillyTavernHost({
             const processor = getContext()?.streamingProcessor;
             const text = String(messages[floor]?.mes || '');
             if (text.trim() && text.trim() !== '...' && (!processor || (processor.isFinished && !processor.isStopped)))
-                markReceipt('complete', roleIsolation?.active() ? await hashRoleResult(text) : undefined);
+                markReceipt(
+                    isRoleCardTruncated(text, validationOptions) ? 'invalid' : 'complete',
+                    roleIsolation?.active() ? await hashRoleResult(text) : undefined,
+                );
         };
         if (stopEvent) context.eventSource?.on(stopEvent, onUserStop);
         if (startEvent) context.eventSource?.on(startEvent, onStarted);
@@ -331,7 +341,7 @@ export function createSillyTavernHost({
             const processor = getContext()?.streamingProcessor;
             const isStreamInterrupted = Boolean(processor && (!processor.isFinished || processor.isStopped));
             markReceipt(
-                isStreamInterrupted ? 'partial' : 'complete',
+                isStreamInterrupted ? 'partial' : isRoleCardTruncated(text, validationOptions) ? 'invalid' : 'complete',
                 roleIsolation?.active() ? await hashRoleResult(text) : undefined,
             );
             await context.saveChat();
