@@ -27,10 +27,10 @@ function setup(replies = [{ text: '结果' }]) {
     return { settings, host, snapshot, runner, notify };
 }
 
-it('substitutes all placeholders in order, preserves duplicate names and caps the list', async () => {
+it('substitutes all placeholders and runs each unique full name once with an automatic total', async () => {
     vi.useFakeTimers();
     const { settings, host, runner } = setup();
-    settings.totalChapters = 2;
+    settings.totalChapters = 1;
     settings.roleNames = ' 琴 \n\n琴\n安柏';
     await vi.runAllTimersAsync();
     const task = runner.start();
@@ -38,9 +38,10 @@ it('substitutes all placeholders in order, preserves duplicate names and caps th
     await task;
     expect(host.generateRoleReply.mock.calls.map((call) => call[1])).toEqual([
         '生成 琴，名字为 琴',
-        '生成 琴，名字为 琴',
+        '生成 安柏，名字为 安柏',
     ]);
     expect(settings.roleBatch.index).toBe(2);
+    expect(settings.totalChapters).toBe(2);
     expect(settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
     expect(host.restoreRoleTemplate).toHaveBeenCalledWith(settings.roleBatch);
     expect(parseRoleNames(' A\r\n\nB ')).toEqual(['A', 'B']);
@@ -62,6 +63,7 @@ it('stops at the shorter list and accepts short or unformatted text', async () =
 it('retries the same name twice and advances after the third attempt succeeds', async () => {
     vi.useFakeTimers();
     const { settings, host, runner } = setup([{ text: '' }, new Error('network'), { text: '正文' }]);
+    settings.roleNames = '琴\n安柏';
     settings.totalChapters = 2;
     const task = runner.start();
     await vi.runAllTimersAsync();
@@ -92,6 +94,7 @@ it('marks failure and stops the batch after exactly three empty replies', async 
 it('marks explicit truncation and continues without retrying that character', async () => {
     vi.useFakeTimers();
     const { settings, host, runner } = setup([{ text: '半截', truncated: true }, { text: '完成' }]);
+    settings.roleNames = '琴\n安柏';
     settings.totalChapters = 2;
     const task = runner.start();
     await vi.runAllTimersAsync();

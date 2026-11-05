@@ -2,6 +2,8 @@ import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
 import { isRoleCardTruncated } from '../novel/tagFilters.js';
 import { createRoleResultIsolation } from './resultIsolation.js';
 import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
+import { ROLE_ENTRY_KEY, ROLE_WORLDBOOK_KEY, writeRoleWorldbook } from '../novel/roleWorldbook.js';
+import { roleComplete } from '../novel/roleBatchState.js';
 
 export function getSillyTavernContext() {
     return globalThis.SillyTavern?.getContext?.() ?? globalThis.getContext?.() ?? null;
@@ -123,7 +125,7 @@ export function createSillyTavernHost({
                     receipt.status === 'complete' &&
                     !!text?.trim() &&
                     text.trim() !== '...' &&
-                    !isRoleCardTruncated(text, validationOptions)
+                    (receipt.origin === 'worldbook' || !isRoleCardTruncated(text, validationOptions))
                 );
             });
             if (
@@ -163,6 +165,134 @@ export function createSillyTavernHost({
         for (const [item, update] of updates) Object.assign(item, update);
         batch.pending = false;
         batch.dispatch = null;
+    }
+
+    async function importRoleResults(batch, imported, commit) {
+        const context = getContext(),
+            messages = getChat();
+        const assertCurrent = () => {
+            if (snapshot().identity !== batch.identity || messages !== getChat())
+                throw new Error('导入期间聊天已切换，请返回原聊天后重试');
+            if (roleGeneration || snapshot().generating === true) throw new Error('请先等待酒馆生成结束');
+        };
+        assertCurrent();
+        await roleIsolation?.verify();
+        const floor = batch.resultFloor ?? batch.promptFloor + 1;
+        const previous = messages[floor];
+        if (messages.length !== floor + (previous ? 1 : 0) || previous?.is_user || previous?.is_system)
+            throw new Error('任务对应的回复楼层已变化，请先核对聊天');
+        if (!previous && typeof context.addOneMessage !== 'function')
+            throw new Error('当前酒馆缺少消息显示接口，无法导入备选回复');
+        const draft = previous
+            ? structuredClone(previous)
+            : {
+                  name: context.name2 || '角色成果',
+                  is_user: false,
+                  is_system: false,
+                  send_date: new Date().toISOString(),
+                  mes: '',
+                  swipe_id: 0,
+                  swipes: [],
+                  swipe_info: [],
+                  extra: {},
+              };
+        draft.swipes ??= [draft.mes];
+        draft.swipe_info ??= [];
+        const selected = draft.swipe_id ?? 0;
+        if (previous) {
+            draft.swipes[selected] = draft.mes;
+            draft.swipe_info[selected] = { ...draft.swipe_info[selected], extra: structuredClone(draft.extra || {}) };
+        }
+        for (const role of imported.roles) {
+            const swipe = draft.swipes.length;
+            const entry = structuredClone(role.entry);
+            delete entry.content;
+            const extra = {
+                nag_role_batch: { taskId: batch.id, itemId: role.item.id, status: 'complete', origin: 'worldbook' },
+                [ROLE_ENTRY_KEY]: entry,
+                [RESULT_HASH_KEY]: await hashRoleResult(role.text),
+            };
+            assertCurrent();
+            draft.swipes.push(role.text);
+            draft.swipe_info.push({ send_date: draft.send_date, extra });
+            Object.assign(role.item, {
+                processed: true,
+                failed: false,
+                processing: false,
+                legacy: false,
+                swipe,
+                origin: 'worldbook',
+            });
+        }
+        const source = (draft[ROLE_WORLDBOOK_KEY] ??= {
+            metadata: imported.metadata,
+            entriesAsArray: imported.entriesAsArray,
+            retained: [],
+        });
+        const retained = new Set(source.retained.map((entry) => JSON.stringify(entry)));
+        for (const entry of imported.retained) {
+            const key = JSON.stringify(entry);
+            if (!retained.has(key)) {
+                source.retained.push(structuredClone(entry));
+                retained.add(key);
+            }
+        }
+        draft.mes = draft.swipes[selected];
+        draft.extra = structuredClone(draft.swipe_info[selected]?.extra || {});
+        draft.swipe_id = selected;
+        assertCurrent();
+        batch.resultFloor = floor;
+        if (previous) messages[floor] = draft;
+        else messages.push(draft);
+        try {
+            await context.saveChat();
+            commit();
+        } catch (error) {
+            if (messages[floor] === draft) {
+                if (previous) messages[floor] = previous;
+                else messages.splice(floor, 1);
+                if (snapshot().identity === batch.identity) {
+                    try {
+                        await context.saveChat();
+                    } catch {
+                        throw Object.assign(new Error('导入保存失败，恢复保存也未成功；请保留当前页面并下载错误日志'), {
+                            code: 'IMPORT_ROLLBACK_FAILED',
+                            uncertain: true,
+                        });
+                    }
+                }
+            }
+            throw error;
+        }
+        if (snapshot().identity === batch.identity) {
+            try {
+                if (previous) context.updateMessageBlock(floor, draft);
+                else context.addOneMessage(draft);
+            } catch {
+                throw Object.assign(new Error('角色已导入并保存，预览刷新失败；请刷新酒馆后查看'), {
+                    code: 'IMPORT_PREVIEW_FAILED',
+                });
+            }
+        }
+    }
+
+    function exportRoleWorldbook(batch) {
+        if (snapshot().identity !== batch.identity || snapshot().generating === true)
+            throw new Error('请返回原聊天，并等待生成结束后导出');
+        const reply = getChat()?.[batch.resultFloor];
+        if (!reply) throw new Error('没有角色成果可导出');
+        const results = [...batch.items, ...(batch.history || [])]
+            .filter(roleComplete)
+            .map((item) => ({
+                name: item.name,
+                text: item.swipe === (reply.swipe_id ?? 0) ? reply.mes : reply.swipes?.[item.swipe],
+                entry:
+                    reply.swipe_info?.[item.swipe]?.extra?.nag_role_batch?.origin === 'worldbook'
+                        ? reply.swipe_info[item.swipe].extra[ROLE_ENTRY_KEY]
+                        : undefined,
+            }))
+            .filter((result) => typeof result.text === 'string' && result.text.trim());
+        return writeRoleWorldbook(results, reply[ROLE_WORLDBOOK_KEY]);
     }
 
     async function generateRoleReply(
@@ -206,6 +336,10 @@ export function createSillyTavernHost({
             message.swipe_info[expectedSwipe] ??= {};
             message.swipe_info[expectedSwipe].extra ??= {};
             message.swipe_info[expectedSwipe].extra.nag_role_batch = receipt;
+            // Native overswipe may inherit extra from the selected imported page.
+            // A fresh generation must never reuse that page's worldbook entry identity.
+            delete message.extra[ROLE_ENTRY_KEY];
+            delete message.swipe_info[expectedSwipe].extra[ROLE_ENTRY_KEY];
             if (textHash) {
                 message.extra[RESULT_HASH_KEY] = textHash;
                 message.swipe_info[expectedSwipe].extra[RESULT_HASH_KEY] = textHash;
@@ -397,6 +531,8 @@ export function createSillyTavernHost({
         generateRoleReply,
         restoreRoleTemplate,
         reconcileRoleBatch,
+        importRoleResults,
+        exportRoleWorldbook,
         async confirmRoleRestart() {
             return !!(await getContext().Popup.show.confirm(
                 '从头生成全部角色',

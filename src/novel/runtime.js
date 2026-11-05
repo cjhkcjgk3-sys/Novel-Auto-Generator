@@ -12,6 +12,7 @@ export function initNovelUI(host) {
     let refreshTimer;
     let disposed = false;
     let cleanupHelp = null;
+    let fileOperation = false;
     const extensionName = 'novel-auto-generator';
 
     const defaultSettings = {
@@ -70,7 +71,7 @@ export function initNovelUI(host) {
     let resultIsolation = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.5';
+    const pluginVersion = '1.10.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -596,6 +597,7 @@ export function initNovelUI(host) {
     const roleStatusRenderer = createListRenderer();
 
     async function startGeneration() {
+        if (fileOperation) return;
         try {
             await resultIsolation.prepare();
         } catch (error) {
@@ -624,7 +626,7 @@ export function initNovelUI(host) {
     }
 
     async function resetProgress({ restart = false } = {}) {
-        if (settings.isRunning) {
+        if (settings.isRunning || fileOperation) {
             toastr.warning('请先停止');
             return;
         }
@@ -700,6 +702,26 @@ export function initNovelUI(host) {
 
     async function exportAsJSON(silent = false) {
         if (!(await verifyExportResults())) return;
+        if (settings.generationMode === 'role-batch') {
+            if (fileOperation) return;
+            fileOperation = true;
+            updateUI();
+            try {
+                const worldbook = await roleRunner.exportWorldbook();
+                downloadFile(
+                    JSON.stringify(worldbook, null, 2),
+                    `role-worldbook_${Date.now()}.json`,
+                    'application/json',
+                );
+                if (!silent) toastr.success('已导出角色世界书');
+            } catch (error) {
+                toastr.warning(error.message);
+            } finally {
+                fileOperation = false;
+                updateUI();
+            }
+            return;
+        }
         const chapters = getAllChapters();
         if (!chapters.length) {
             if (!silent) toastr.warning('没有内容');
@@ -711,6 +733,32 @@ export function initNovelUI(host) {
             'application/json',
         );
         if (!silent) toastr.success('已导出 JSON');
+    }
+
+    async function importWorldbookFile(file) {
+        if (!file || settings.isRunning || fileOperation) return;
+        fileOperation = true;
+        updateUI();
+        try {
+            let data;
+            try {
+                data = JSON.parse((await file.text()).replace(/^\uFEFF/, ''));
+            } catch {
+                throw new Error('世界书 JSON 格式无效，请检查文件');
+            }
+            const result = await roleRunner.importWorldbook(data, file.name);
+            toastr.success(
+                `已导入 ${result.added} 位角色，跳过 ${result.duplicates} 个重名项${result.skipped ? `、${result.skipped} 个无效条目` : ''}`,
+            );
+        } catch (error) {
+            // Parser messages may contain source text; only retain this bounded user-facing error.
+            if (error.message === '世界书 JSON 格式无效，请检查文件') recordError(error, { phase: 'import-worldbook' });
+            toastr.warning(error.message);
+        } finally {
+            fileOperation = false;
+            $('#nag-role-worldbook-file').val('');
+            syncUI();
+        }
     }
 
     // ============================================
@@ -747,26 +795,36 @@ export function initNovelUI(host) {
         resultIsolation?.refresh();
         const batchMode = settings.generationMode === 'role-batch';
         const batch = settings.roleBatch;
-        if (batchMode && batch && !settings.isRunning) {
-            const parsed = parseRoleNames(settings.roleNames).slice(0, Math.max(1, settings.totalChapters));
+        if (batchMode && batch && !settings.isRunning && !fileOperation) {
+            const parsed = parseRoleNames(settings.roleNames);
             if (batch.names && JSON.stringify(batch.names) !== JSON.stringify(parsed)) {
                 updateRoleNames(batch, parsed);
                 batch.inputNames = settings.roleNames;
                 batch.inputLimit = settings.totalChapters;
             }
         }
-        const roleNames = batch?.names || parseRoleNames(settings.roleNames).slice(0, settings.totalChapters);
+        const roleNames = batch?.names || parseRoleNames(settings.roleNames);
         const total = batchMode ? roleNames.length : settings.totalChapters;
         const completed = batchMode ? batch?.items?.filter(roleComplete).length || 0 : settings.currentChapter;
         const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
         $('#nag-progress-fill').css('width', `${pct}%`);
         $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
-        $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', settings.isRunning);
+        const busy = settings.isRunning || fileOperation;
+        $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', busy);
+        $('#nag-set-total').prop('readOnly', batchMode);
+        if (batchMode) $('#nag-set-total').val(roleNames.length);
+        $('#nag-role-name-hint, #nag-btn-import-worldbook').toggle(batchMode);
+        $('#nag-btn-import-worldbook, #nag-btn-export-json').prop('disabled', busy);
+        $('#nag-btn-export-json').text(batchMode ? '📦 世界书 JSON' : '📦 JSON');
+        $('#nag-btn-export-json').attr(
+            'title',
+            batchMode ? '合并导出已有与新增角色；楼层范围仅用于 TXT 导出' : '导出所选楼层的 JSON',
+        );
         $('#nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
-        $('#nag-set-minlen, #nag-set-isolate-result').prop('disabled', settings.isRunning);
+        $('#nag-set-minlen, #nag-set-isolate-result').prop('disabled', busy);
         $('.nag-result-isolation-setting').toggle(batchMode);
         $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
-        $('#nag-total-label').text(batchMode ? '目标角色数' : '目标章节');
+        $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
         $('#nag-role-results')
             .toggle(batchMode)
@@ -789,14 +847,14 @@ export function initNovelUI(host) {
             : ['⏹️ 已停止', 'stopped'];
         $('#nag-status').text(txt).removeClass('stopped paused running').addClass(cls);
 
-        $('#nag-btn-start').prop('disabled', settings.isRunning);
+        $('#nag-btn-start').prop('disabled', busy);
         $('#nag-btn-pause').prop('disabled', !settings.isRunning || settings.isPaused);
         $('#nag-btn-resume').prop('disabled', !settings.isPaused);
         $('#nag-btn-stop').prop('disabled', !settings.isRunning);
-        $('#nag-btn-reset').prop('disabled', settings.isRunning);
+        $('#nag-btn-reset').prop('disabled', busy);
         $('#nag-btn-start').text(batchMode ? '▶️ 开始／继续' : '▶️ 开始');
         $('#nag-btn-reset').text(batchMode ? '🔄 重置（保留已完成）' : '🔄 重置');
-        $('#nag-btn-restart-role').toggle(batchMode).prop('disabled', settings.isRunning);
+        $('#nag-btn-restart-role').toggle(batchMode).prop('disabled', busy);
 
         if (settings.isRunning && generationStats.startTime && generationStats.chaptersGenerated > 0) {
             const elapsed = Date.now() - generationStats.startTime;
@@ -890,6 +948,7 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label>生成方式</label><select id="nag-set-mode"><option value="novel">原有自动续写</option><option value="role-batch">同楼层批量生成</option></select></div>
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
+                        <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过；不同作品或形态请在名称中注明。</small>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                         </div>
@@ -919,6 +978,8 @@ export function initNovelUI(host) {
                             <label class="nag-checkbox-label"><input type="checkbox" id="nag-set-use-raw"><span>📄 原始 (chat.mes)</span></label>
                         </div>
                         <div class="nag-btn-row">
+                            <button id="nag-btn-import-worldbook" class="menu_button" style="display:none">📥 导入世界书</button>
+                            <input id="nag-role-worldbook-file" type="file" accept=".json,application/json" hidden>
                             <button id="nag-btn-export-txt" class="menu_button">📄 TXT</button>
                             <button id="nag-btn-export-json" class="menu_button">📦 JSON</button>
                         </div>
@@ -1138,6 +1199,12 @@ export function initNovelUI(host) {
         });
         $('#nag-btn-export-txt').on('click', () => exportNovel(false));
         $('#nag-btn-export-json').on('click', () => exportAsJSON(false));
+        $('#nag-btn-import-worldbook').on('click', () => {
+            if (!settings.isRunning && !fileOperation) $('#nag-role-worldbook-file').trigger('click');
+        });
+        $('#nag-role-worldbook-file').on('change', function () {
+            void importWorldbookFile(this.files?.[0]);
+        });
         $('#nag-btn-refresh-floors').on('click', () => $('#nag-total-floors').text(getTotalFloors()));
         $('#nag-btn-refresh-preview').on('click', refreshPreview);
         // TXT转世界书入口
@@ -1297,6 +1364,7 @@ export function initNovelUI(host) {
         $('#nag-set-mode').on('change', function () {
             if (settings.isRunning) return;
             settings.generationMode = $(this).val() === 'role-batch' ? 'role-batch' : 'novel';
+            if (settings.generationMode === 'role-batch') roleRunner.saveInput();
             if (settings.generationMode === 'role-batch' && settings.roleBatch?.inputLimit) {
                 settings.totalChapters = settings.roleBatch.inputLimit;
                 $('#nag-set-total').val(settings.totalChapters);
@@ -1317,6 +1385,12 @@ export function initNovelUI(host) {
             if (settings.generationMode === 'role-batch') roleRunner.saveInput();
             saveSettings();
             updateUI();
+        });
+        $('#nag-set-prompt').on('change', function () {
+            if (settings.generationMode !== 'role-batch') return;
+            settings.roleNames = parseRoleNames(settings.roleNames).join('\n');
+            $(this).val(settings.roleNames);
+            roleRunner.saveInput();
         });
         $('#nag-set-autosave').on('change', function () {
             settings.autoSaveInterval = +$(this).val() || 50;

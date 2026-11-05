@@ -105,7 +105,7 @@ it('reset retains completed rows while an explicit restart clears progress even 
     expect(f.host.generateRoleReply).toHaveBeenCalledTimes(6);
 });
 
-it('name edits retain completed occurrences, support reorder, removal and later re-addition', async () => {
+it('name edits deduplicate tasks and retain completion across reorder and re-addition', async () => {
     vi.useFakeTimers();
     const f = fixture();
     const { runner, settings } = f.create({ roleNames: '琴\n琴', totalChapters: 2 });
@@ -113,16 +113,26 @@ it('name edits retain completed occurrences, support reorder, removal and later 
     settings.roleNames = '琴\n安柏\n琴';
     settings.totalChapters = 3;
     runner.saveInput();
-    expect(settings.roleBatch.names).toEqual(['琴', '安柏', '琴']);
-    expect(settings.roleBatch.items.map((item) => !!item.processed)).toEqual([true, false, true]);
+    expect(settings.roleBatch.names).toEqual(['琴', '安柏']);
+    expect(settings.roleBatch.items.map((item) => !!item.processed)).toEqual([true, false]);
     await run(runner);
-    expect(f.host.generateRoleReply.mock.calls.map((call) => call[1])).toEqual(['生成 琴', '生成 琴', '生成 安柏']);
+    expect(f.host.generateRoleReply.mock.calls.map((call) => call[1])).toEqual(['生成 琴', '生成 安柏']);
     const batch = settings.roleBatch;
     const ids = batch.items.map((item) => item.id);
     updateRoleNames(batch, ['安柏']);
     updateRoleNames(batch, ['琴', '琴', '安柏']);
-    expect(batch.items.map((item) => item.id)).toEqual([ids[0], ids[2], ids[1]]);
+    expect(batch.items.map((item) => item.id)).toEqual([ids[0], ids[1]]);
     expect(batch.items.every((item) => item.processed)).toBe(true);
+});
+
+it('migrates old repeated names by preferring success while retaining all existing result records', () => {
+    const batch = hydrateRoleBatch({
+        names: [' 琴 ', '琴', '三月七·存护', '三月七·巡猎'],
+        items: [{ id: 'failed', failed: true }, { id: 'success', processed: true, swipe: 1 }, {}, {}],
+    });
+    expect(batch.names).toEqual(['琴', '三月七·存护', '三月七·巡猎']);
+    expect(batch.items[0].id).toBe('success');
+    expect(batch.history.some((item) => item.id === 'failed')).toBe(true);
 });
 
 it('removes edited-out rows immediately, persists an empty list and retains completion on re-addition', async () => {
