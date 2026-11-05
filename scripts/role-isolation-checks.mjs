@@ -19,48 +19,83 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
     const snapshots = [];
     await toggle(false);
     await restartBatch();
-    await page.evaluate(async () => {
+    const clearResult = () =>
+        page.evaluate(async () => {
+            const c = window.SillyTavern.getContext();
+            c.chat.splice(2);
+            await c.saveChat();
+            await (await import('/script.js')).printMessages();
+            window.__nagResultRuns = 0;
+        });
+    await clearResult();
+    const generate = (names, failed = false) =>
+        page.evaluate(
+            async ({ names, failed }) => {
+                for (const [id, value] of Object.entries({
+                    'nag-set-total': String(names.length),
+                    'nag-set-prompt': names.join('\n'),
+                })) {
+                    const element = document.getElementById(id);
+                    element.value = value;
+                    element.dispatchEvent(new Event('change'));
+                }
+                await window.jQuery('#nag-btn-start').triggerHandler('click');
+                const settings = window.SillyTavern.getContext().extensionSettings['novel-auto-generator'];
+                if (settings.roleBatch.items.some((item) => item.failed) !== failed)
+                    throw new Error('Unexpected role validation result');
+            },
+            { names, failed },
+        );
+    // A received but invalid body must stay failed after reload and reset, then be retried.
+    const beforeInvalid = requests.length;
+    setFrontendReply('incomplete');
+    await toggle(true);
+    await generate(['待补写角色'], true);
+    const invalid = await page.evaluate(async () => {
         const c = window.SillyTavern.getContext();
-        c.chat.splice(2);
-        await c.saveChat();
-        await (await import('/script.js')).printMessages();
-        window.__nagResultRuns = 0;
+        await (await import('/script.js')).saveSettings();
+        return {
+            failed: c.extensionSettings['novel-auto-generator'].roleBatch.items[0].failed,
+            receipt: c.chat[2].swipe_info[0].extra.nag_role_batch.status,
+        };
     });
-    const generate = (names) =>
-        page.evaluate(async (names) => {
-            for (const [id, value] of Object.entries({
-                'nag-set-total': String(names.length),
-                'nag-set-prompt': names.join('\n'),
-            })) {
-                const element = document.getElementById(id);
-                element.value = value;
-                element.dispatchEvent(new Event('change'));
-            }
-            await window.jQuery('#nag-btn-start').triggerHandler('click');
-            const settings = window.SillyTavern.getContext().extensionSettings['novel-auto-generator'];
-            if (settings.roleBatch.items.some((item) => item.failed))
-                throw new Error('Protected frontend generation failed');
-        }, names);
+    assert.equal(invalid.failed, true);
+    assert.equal(invalid.receipt, 'invalid');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => document.getElementById('nag-btn-reset'));
+    await reopenChat();
+    await connect();
+    await page.evaluate(async () => {
+        await window.jQuery('#nag-btn-reset').triggerHandler('click');
+    });
+    assert.equal(
+        await page.evaluate(
+            () => window.SillyTavern.getContext().extensionSettings['novel-auto-generator'].roleBatch.items[0].failed,
+        ),
+        true,
+    );
     setFrontendReply(true);
+    await generate(['待补写角色']);
+    assert.equal(requests.length, beforeInvalid + 2, 'The failed role is retried instead of being skipped');
+    await toggle(false);
+    await restartBatch();
+    await clearResult();
     await toggle(true);
     await generate(['隔离生成甲', '隔离生成乙']);
-    assert.equal(
-        await page.evaluate(() => window.__nagResultRuns),
-        0,
-        'Streaming generated code stays inert from the first result',
-    );
-    await page.evaluate(() => {
+    await page.waitForFunction(() => window.__nagResultRuns > 0);
+    const beforeJson = await page.evaluate(() => {
         const input = document.getElementById('stream_toggle');
         if (input.checked) input.click();
+        return window.__nagResultRuns;
     });
     await generate(['隔离生成丙']);
+    await page.waitForFunction((runs) => window.__nagResultRuns > runs, beforeJson);
     setFrontendReply(false);
     await page.evaluate(() => {
         const input = document.getElementById('stream_toggle');
         if (!input.checked) input.click();
     });
-    assert.equal(await page.evaluate(() => window.__nagResultRuns), 0, 'Non-streamed generated code also stays inert');
-    assert.equal(await page.locator('#chat .mes[mesid="2"] iframe').count(), 0);
+    assert.equal(await page.locator('#chat .mes[mesid="2"] iframe').count(), 1);
     await toggle(false);
     await page.evaluate(async () => {
         const c = window.SillyTavern.getContext();
@@ -94,6 +129,7 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
             reply.extra = {};
             window.__nagExpectedBodies = [...reply.swipes];
             c.updateMessageBlock(2, reply);
+            await c.eventSource.emit(c.eventTypes.CHARACTER_MESSAGE_RENDERED, 2, 'extension');
             await c.saveChat();
         }, count);
     const sample = () =>
@@ -107,33 +143,40 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
                 blockers: document.querySelectorAll('.nag-result-render-blocker').length,
                 targetFrames: document.querySelectorAll('#chat .mes[mesid="2"] iframe').length,
                 targetCodeBlocks: body.querySelectorAll('pre,code').length,
-                currentTextMatches: body.textContent === c.chat[2].mes,
+                selectedRawMatches: c.chat[2].mes === c.chat[2].swipes[c.chat[2].swipe_id],
+                previewHint: document.getElementById('nag-result-preview-window').textContent,
                 allBodiesMatch: JSON.stringify(c.chat[2].swipes) === JSON.stringify(window.__nagExpectedBodies),
                 listeners: Object.values(c.eventSource.events).reduce((sum, list) => sum + list.length, 0),
             };
         });
     for (const count of [50, 100]) {
-        // Set raw fixture data without dispatching a render event; enabling takes ownership first.
+        // Fixture writes dispatch the same render event as a native message update.
         await toggle(false);
         await setSwipes(count);
         await toggle(true);
-        const runs = await page.evaluate(() => window.__nagResultRuns);
+        await page.waitForFunction(() => document.querySelector('#chat .mes[mesid="2"] iframe'));
         for (const swipe of [0, Math.floor(count / 2), count - 1, 1, count - 1]) {
             await page.evaluate(async (swipe) => {
                 const core = await import('/script.js');
                 await core.swipe(null, 'right', { forceMesId: 2, forceSwipeId: swipe, forceDuration: 0 });
             }, swipe);
         }
+        await page.waitForFunction(
+            (index) =>
+                document
+                    .querySelector('#chat .mes[mesid="2"] iframe')
+                    ?.contentDocument?.body?.textContent.includes(`PROTECTED_RESULT_${index}`),
+            count - 1,
+        );
         const result = await sample();
         assert.equal(result.swipes, count);
         assert.equal(result.floors, 3);
-        assert.equal(result.previewCount, 1);
-        assert.equal(result.blockers, 1);
-        assert.equal(result.targetFrames, 0);
-        assert.equal(result.targetCodeBlocks, 0);
-        assert.equal(result.currentTextMatches, true);
+        assert.equal(result.previewCount, 0);
+        assert.equal(result.blockers, 0);
+        assert.equal(result.targetFrames, 1);
+        assert.equal(result.selectedRawMatches, true);
         assert.equal(result.allBodiesMatch, true);
-        assert.equal(await page.evaluate(() => window.__nagResultRuns), runs, 'Protected result scripts never execute');
+        assert.equal(result.previewHint, `正常预览：第 ${count - 1}、${count} 页`);
         snapshots.push(result);
     }
     assert.equal(snapshots[0].listeners, snapshots[1].listeners, 'More swipes do not add event subscriptions');
@@ -143,39 +186,82 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
         'The upper workbench is preserved without unnecessary remounts',
     );
 
-    // Enable the real helper's experimental streaming renderer and exercise its native event path.
+    // Native page switches during hashing must neither abort nor leak the copied result into the prompt.
+    const switchedDuringHash = await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        const core = await import('/script.js');
+        const original = crypto.subtle.digest;
+        let release;
+        let first = true;
+        crypto.subtle.digest = async function (...args) {
+            if (first) {
+                first = false;
+                await new Promise((resolve) => {
+                    release = resolve;
+                });
+            }
+            return original.apply(this, args);
+        };
+        try {
+            const prompt = c.chat.map((message) => ({ ...message }));
+            let aborted = false;
+            const checking = window.NovelGen_isolateRoleResult(prompt, 0, () => {
+                aborted = true;
+            });
+            await core.swipe(null, 'right', { forceMesId: 2, forceSwipeId: 49, forceDuration: 0 });
+            release();
+            await checking;
+            return {
+                aborted,
+                messages: prompt.length,
+                leaked: prompt.some((message) => message.mes.includes('PROTECTED_RESULT_')),
+                hint: document.getElementById('nag-result-preview-window').textContent,
+            };
+        } finally {
+            crypto.subtle.digest = original;
+        }
+    });
+    assert.equal(switchedDuringHash.aborted, false);
+    assert.equal(switchedDuringHash.messages, 2);
+    assert.equal(switchedDuringHash.leaked, false);
+    assert.equal(switchedDuringHash.hint, '正常预览：第 49、50、51 页');
+
+    // Enabling helper streaming rendering still allows the selected page to render normally.
     await page.locator('#TH-render-allow-streaming').dispatchEvent('click');
     await page.locator('.TH-popup [role="dialog"] .popup-button-ok').dispatchEvent('click');
     await page.waitForFunction(() => document.querySelector('#TH-render-allow-streaming')?.checked);
     await page.evaluate(async () => {
         const c = window.SillyTavern.getContext();
-        await c.eventSource.emit(c.eventTypes.STREAM_TOKEN_RECEIVED, 'synthetic token');
         await c.eventSource.emit(c.eventTypes.CHARACTER_MESSAGE_RENDERED, 2, 'extension');
     });
-    const streamed = await sample();
-    assert.equal(streamed.targetFrames, 0);
-    assert.equal(streamed.currentTextMatches, true);
-
-    // Turning protection off must really restore helper rendering, not just change a checkbox.
+    await page.waitForFunction(() => document.querySelector('#chat .mes[mesid="2"] iframe'));
+    await page.evaluate(() => {
+        window.__nagFrameBeforeToggle = document.querySelector('#chat .mes[mesid="2"] iframe');
+    });
     await toggle(false);
-    await page.waitForFunction(() => window.__nagResultRuns > 0);
     await toggle(true);
-    await page.waitForFunction(() => !document.querySelector('#chat .mes[mesid="2"] iframe'));
+    assert.equal(
+        await page.evaluate(
+            () => window.__nagFrameBeforeToggle === document.querySelector('#chat .mes[mesid="2"] iframe'),
+        ),
+        true,
+        'The isolation switch does not remount the native preview',
+    );
     const beforeReload = await page.evaluate(async () => {
         const core = await import('/script.js');
         await core.saveChatConditional();
         await core.saveSettings();
         return [...window.SillyTavern.getContext().chat[2].swipes];
     });
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(
         () => document.getElementById('nag-btn-isolate-result') || document.getElementById('nag-set-isolate-result'),
     );
     await reopenChat();
     await connect();
     assert.deepEqual(await page.evaluate(() => window.SillyTavern.getContext().chat[2].swipes), beforeReload);
-    await page.waitForFunction(() => document.querySelector('#chat .mes[mesid="2"] .nag-result-plain'));
-    assert.equal(await page.locator('#chat .mes[mesid="2"] iframe').count(), 0);
+    await page.waitForFunction(() => document.querySelector('#chat .mes[mesid="2"] iframe'));
+    assert.equal(await page.locator('#chat .mes[mesid="2"] .nag-result-plain').count(), 0);
 
     await page.setViewportSize({ width: 390, height: 844 });
     const fits = await page
@@ -218,7 +304,7 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
     const cleanup = await page.evaluate(async () => {
         const c = window.SillyTavern.getContext();
         const entry = await import('/scripts/extensions/third-party/Novel-Auto-Generator/index.js');
-        const count = () => c.eventSource.events.TH_REQUEST_RENDER_MESSAGE.length;
+        const count = () => c.eventSource.events[c.eventTypes.MESSAGE_SWIPED].length;
         const before = count();
         entry.disposeNovelExtension();
         const after = count();
@@ -236,8 +322,10 @@ export async function runRoleIsolationChecks({ page, requests, reopenChat, conne
         streamedRoleGeneration: true,
         jsonRoleGeneration: true,
         snapshots,
-        helperStreamingBlocked: true,
-        toggleRestoresRendering: true,
+        helperStreamingPreview: true,
+        togglePreservesRendering: true,
+        failedReceiptRetriedAfterReload: true,
+        swipeDuringHashKeepsPromptIsolation: true,
         reloadPreserves100Swipes: true,
         phoneWidth: true,
         promptIsolation: true,

@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { webcrypto } from 'node:crypto';
 import { createRoleResultIsolation, ROLE_RESULT_INTERCEPTOR } from '../../src/host/resultIsolation.js';
 import { verifyRoleResults, clearRoleResultHashes } from '../../src/host/roleResultIntegrity.js';
 import { createSillyTavernHost } from '../../src/host/sillyTavern.js';
@@ -129,6 +130,75 @@ it('detects changes to the selected message even if its backing swipe was left u
     await f.isolation.prepare();
     f.message.mes = '改动';
     await expect(f.isolation.verify()).rejects.toMatchObject({ code: 'RESULT_CHANGED' });
+});
+
+it('allows a native swipe switch during hashing without reporting an unchanged body as modified', async () => {
+    const f = setup(3);
+    await f.isolation.prepare();
+    let finish;
+    const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    vi.stubGlobal('crypto', {
+        subtle: {
+            digest: vi.fn(digest).mockImplementationOnce(
+                (...args) =>
+                    new Promise((resolve) => {
+                        finish = async () => resolve(await digest(...args));
+                    }),
+            ),
+        },
+    });
+    const checking = f.isolation.verify();
+    f.message.swipes = [...f.message.swipes];
+    f.message.swipe_id = 1;
+    f.message.mes = f.message.swipes[1];
+    f.message.extra = structuredClone(f.message.swipe_info[1].extra);
+    await finish();
+    await expect(checking).resolves.toBeUndefined();
+    f.message.swipes[0] += ' unexpected change';
+    await expect(f.isolation.verify()).rejects.toMatchObject({ code: 'RESULT_CHANGED', expectedSwipe: 0 });
+});
+
+it('keeps rendering native and reports a moving three-page preview window, including a pending new page', async () => {
+    const f = setup(100);
+    const rendered = vi.fn();
+    f.source.on('rendered', rendered);
+    await f.isolation.prepare();
+    expect(rendered).not.toHaveBeenCalled();
+    expect(f.context.updateMessageBlock).not.toHaveBeenCalled();
+    expect(f.isolation.previewWindow()).toEqual([0, 1]);
+    f.message.swipe_id = 49;
+    expect(f.isolation.previewWindow()).toEqual([48, 49, 50]);
+    f.message.swipe_id = 99;
+    expect(f.isolation.previewWindow()).toEqual([98, 99]);
+    f.message.swipe_id = 100;
+    expect(f.isolation.previewWindow()).toEqual([99, 100]);
+});
+
+it('still excludes the copied result if native swiping replaces its metadata while the interceptor is hashing', async () => {
+    const f = setup(3);
+    await f.isolation.prepare();
+    let finish;
+    const digest = webcrypto.subtle.digest.bind(webcrypto.subtle);
+    vi.stubGlobal('crypto', {
+        subtle: {
+            digest: vi.fn(digest).mockImplementationOnce(
+                (...args) =>
+                    new Promise((resolve) => {
+                        finish = async () => resolve(await digest(...args));
+                    }),
+            ),
+        },
+    });
+    const prompt = f.chat.map((message) => ({ ...message }));
+    const abort = vi.fn();
+    const checking = globalThis[ROLE_RESULT_INTERCEPTOR](prompt, 10000, abort);
+    f.message.swipe_id = 1;
+    f.message.mes = f.message.swipes[1];
+    f.message.extra = structuredClone(f.message.swipe_info[1].extra);
+    await finish();
+    await checking;
+    expect(abort).not.toHaveBeenCalled();
+    expect(prompt.map((message) => message.mes)).toEqual(['上方工作界面', '生成命令']);
 });
 
 it('allows a deliberate new baseline after disabling protection, retaining all text', async () => {

@@ -70,7 +70,7 @@ export function initNovelUI(host) {
     let resultIsolation = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.9.4';
+    const pluginVersion = '1.9.5';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -233,7 +233,7 @@ export function initNovelUI(host) {
 <h4>📌 提示词</h4>
 <p>每次自动发送给 AI 的消息内容（批量生成模式下为角色列表）。</p>
 <h4>📌 隔离写卡结果</h4>
-<p>仅针对当前批次的结果楼层：备选原文照常保存，当前页以只读纯文本显示，抑制前端自动渲染并排除该结果楼层的模型上下文。预设、命令及上方消息照常使用。关闭开关后恢复正常渲染，并在下次开启时重新建立原文校验基线。</p>
+<p>仅针对当前批次的结果楼层：当前页及前后各一页豁免显示隔离，沿用酒馆原生预览与渲染；未选中候选保留为原生数据，不额外挂载页面。三页豁免不改变模型上下文，旧角色卡仍被排除，预设、命令及上方消息照常使用。原文校验继续有效，主动编辑前请关闭开关，重新开启时建立新的校验基线。</p>
             `,
             },
             export: {
@@ -891,7 +891,7 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
-                            <label class="nag-checkbox-label" title="只隔离当前结果楼层：保留纯文本查看，抑制自动渲染；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（纯文本查看）</span></label>
+                            <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                         </div>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
