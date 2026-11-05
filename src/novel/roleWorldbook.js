@@ -6,6 +6,25 @@ export const ROLE_ENTRY_KEY = 'nag_role_worldbook_entry';
 const otherCategory =
     /^(?:世界观|世界设定|世界规则|背景|地点|场景|物品|规则|系统|作者说明|world|locations?|items?|rules?)$/i;
 
+/**
+ * 备选回复要在酒馆里显示成代码块，才能被酒馆助手渲染成前端窗口。
+ * 写入备选页时包一层 ```text，导出世界书时再剥掉，保证数据本身始终是干净的角色卡文本。
+ */
+const CODE_FENCE = /^```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n```\s*$/;
+
+export function wrapCodeFence(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return '';
+    if (CODE_FENCE.test(value)) return value;
+    return '```text\n' + value + '\n```';
+}
+
+export function unwrapCodeFence(text) {
+    const value = String(text ?? '').trim();
+    const matched = value.match(CODE_FENCE);
+    return matched ? matched[1].trim() : value;
+}
+
 /** Use the existing ST parser; names come from explicit entry titles or primary keywords. */
 export function readRoleWorldbook(input) {
     const root = input?.data?.character_book || input?.character_book || input;
@@ -30,7 +49,7 @@ export function readRoleWorldbook(input) {
         }
         const explicit = entry.comment?.trim() || entry.name?.trim() || entry.key?.[0]?.trim();
         const name = (entry.comment?.trim() ? candidate.name : explicit || '').trim();
-        const text = entry.content;
+        const text = unwrapCodeFence(entry.content);
         if (!name || /[\r\n]/.test(name) || typeof text !== 'string' || !text.trim() || text.trim() === '...') {
             retained.push(entry);
             skipped++;

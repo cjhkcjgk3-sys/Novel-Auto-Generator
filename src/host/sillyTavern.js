@@ -2,7 +2,7 @@ import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
 import { isRoleCardTruncated } from '../novel/tagFilters.js';
 import { createRoleResultIsolation } from './resultIsolation.js';
 import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
-import { ROLE_ENTRY_KEY, ROLE_WORLDBOOK_KEY, writeRoleWorldbook } from '../novel/roleWorldbook.js';
+import { ROLE_ENTRY_KEY, ROLE_WORLDBOOK_KEY, writeRoleWorldbook, wrapCodeFence, unwrapCodeFence } from '../novel/roleWorldbook.js';
 import { roleComplete } from '../novel/roleBatchState.js';
 
 export function getSillyTavernContext() {
@@ -207,13 +207,15 @@ export function createSillyTavernHost({
             const swipe = draft.swipes.length;
             const entry = structuredClone(role.entry);
             delete entry.content;
+            // 备选页里放代码块形态，酒馆助手才能渲染成窗口；世界书里的数据仍是干净正文。
+            const swipeText = wrapCodeFence(role.text);
             const extra = {
                 nag_role_batch: { taskId: batch.id, itemId: role.item.id, status: 'complete', origin: 'worldbook' },
                 [ROLE_ENTRY_KEY]: entry,
-                [RESULT_HASH_KEY]: await hashRoleResult(role.text),
+                [RESULT_HASH_KEY]: await hashRoleResult(swipeText),
             };
             assertCurrent();
-            draft.swipes.push(role.text);
+            draft.swipes.push(swipeText);
             draft.swipe_info.push({ send_date: draft.send_date, extra });
             Object.assign(role.item, {
                 processed: true,
@@ -285,7 +287,9 @@ export function createSillyTavernHost({
             .filter(roleComplete)
             .map((item) => ({
                 name: item.name,
-                text: item.swipe === (reply.swipe_id ?? 0) ? reply.mes : reply.swipes?.[item.swipe],
+                text: unwrapCodeFence(
+                    item.swipe === (reply.swipe_id ?? 0) ? reply.mes : reply.swipes?.[item.swipe],
+                ),
                 entry:
                     reply.swipe_info?.[item.swipe]?.extra?.nag_role_batch?.origin === 'worldbook'
                         ? reply.swipe_info[item.swipe].extra[ROLE_ENTRY_KEY]
