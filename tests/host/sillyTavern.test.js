@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createSillyTavernHost } from '../../src/host/sillyTavern.js';
 import { EventEmitter } from 'node:events';
+import { createRoleBatchRunner } from '../../src/novel/roleBatch.js';
+import { createRoleBatchRecoveryStore } from '../../src/novel/recoveryStore.js';
 
 async function nativeSwipe(context, floor, swipeId) {
     context.eventSource.emit(context.eventTypes.GENERATION_STARTED, 'swipe');
@@ -94,6 +96,7 @@ it('reports unavailable controls as definitely not dispatched', async () => {
 function batchSetup(existing = true) {
     const { host, context } = setup();
     context.updateMessageBlock = vi.fn();
+    context.addOneMessage = vi.fn();
     context.saveChat = vi.fn(async () => {});
     context.chat = [
         { mes: '写卡助手', is_user: false },
@@ -417,4 +420,134 @@ it('does not modify a prompt or dispatch when Tavern has no API connection', asy
     ).rejects.toMatchObject({ code: 'NOT_CONNECTED' });
     expect(context.chat[1].mes).toBe('生成 [[角色名]]');
     expect(context.generate).not.toHaveBeenCalled();
+});
+
+function workbenchSetup(existing = false) {
+    const f = batchSetup(existing);
+    const values = new Map();
+    const storage = { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+    const recovery = createRoleBatchRecoveryStore(() => storage);
+    const create = (settings = { roleNames: '', replyWaitTime: 0, roleBatch: null }) => ({
+        settings,
+        runner: createRoleBatchRunner({
+            getSettings: () => settings,
+            host: f.host,
+            recovery,
+            notify: vi.fn(),
+            onChange: vi.fn(),
+            onStats: vi.fn(),
+        }),
+    });
+    return { ...f, recovery, storage, create };
+}
+const importedBook = {
+    name: '旧角色世界书',
+    custom: { preserved: true },
+    entries: {
+        41: {
+            uid: 41,
+            comment: '琴',
+            key: ['琴', '团长'],
+            content: '<legacy>旧角色原文',
+            disable: true,
+            order: 57,
+            customField: 'preserved',
+        },
+        42: { uid: 42, comment: '安柏', key: ['安柏'], content: '已有角色正文', order: 58 },
+    },
+};
+
+it('imports to native swipes, restores success under new validation rules and continues only missing names', async () => {
+    vi.useFakeTimers();
+    const f = workbenchSetup();
+    const first = f.create();
+    expect(await first.runner.importWorldbook(importedBook)).toMatchObject({ added: 2, duplicates: 0 });
+    expect(first.settings.roleNames).toBe('琴\n安柏');
+    expect(first.settings.totalChapters).toBe(2);
+    expect(first.settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
+    expect(f.context.chat[2].swipes).toEqual(['<legacy>旧角色原文', '已有角色正文']);
+    expect(f.context.addOneMessage).toHaveBeenCalledOnce();
+    const savedChat = JSON.parse(JSON.stringify(f.context.chat));
+    f.context.chat = savedChat;
+    const second = f.create({ roleNames: '', minChapterLength: 10000, expectedClosingTags: ['</new-card>'] });
+    second.runner.restore();
+    await second.runner.resetPending();
+    expect(second.settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
+    second.settings.roleNames += '\n丽莎\n琴\n 丽莎 ';
+    second.settings.expectedClosingTags = [];
+    second.settings.minChapterLength = 0;
+    second.runner.saveInput();
+    const generate = f.context.generate.getMockImplementation();
+    f.context.generate.mockImplementation(async (...args) => {
+        await generate(...args);
+        f.context.chat.at(-1).extra.nag_role_worldbook_entry = structuredClone(importedBook.entries[41]);
+    });
+    const task = second.runner.start();
+    await vi.runAllTimersAsync();
+    await task;
+    expect(f.inputs).toHaveLength(1);
+    expect(f.inputs[0].history.map((m) => m.mes)).toEqual(['写卡助手', '生成 丽莎']);
+    expect(second.settings.roleBatch.names).toEqual(['琴', '安柏', '丽莎']);
+    expect(f.context.chat[2].swipes.slice(0, 2)).toEqual(['<legacy>旧角色原文', '已有角色正文']);
+    const exported = await second.runner.exportWorldbook();
+    expect(exported.custom).toEqual({ preserved: true });
+    expect(exported.entries[41]).toEqual(importedBook.entries[41]);
+    expect(Object.values(exported.entries).find((entry) => entry.comment === '丽莎')).toMatchObject({
+        key: ['丽莎'],
+        disable: false,
+    });
+    expect(Object.values(exported.entries).map((e) => e.content)).toEqual([
+        '<legacy>旧角色原文',
+        '已有角色正文',
+        '生成 丽莎',
+    ]);
+});
+
+it('keeps an existing selected page and treats repeated imports as a no-op for role results', async () => {
+    const f = workbenchSetup(true);
+    const { runner, settings } = f.create();
+    await runner.importWorldbook(importedBook);
+    const pages = [...f.context.chat[2].swipes];
+    expect(pages).toEqual(['旧成品', '<legacy>旧角色原文', '已有角色正文']);
+    expect(f.context.chat[2].mes).toBe('旧成品');
+    expect(await runner.importWorldbook(importedBook)).toMatchObject({ added: 0, duplicates: 2 });
+    expect(f.context.chat[2].swipes).toEqual(pages);
+    expect(settings.roleBatch.names).toEqual(['琴', '安柏']);
+});
+
+it('rolls back a failed chat save without changing the list, journal or native pages', async () => {
+    const f = workbenchSetup(true);
+    const { runner, settings } = f.create({ roleNames: '丽莎', totalChapters: 1, roleBatch: null });
+    const original = structuredClone(f.context.chat);
+    f.context.saveChat.mockRejectedValueOnce(new Error('保存失败'));
+    await expect(runner.importWorldbook(importedBook)).rejects.toThrow('保存失败');
+    expect(f.context.chat).toEqual(original);
+    expect(settings).toMatchObject({ roleNames: '丽莎', totalChapters: 1, roleBatch: null });
+    expect(f.recovery.read()).toBeNull();
+    expect(f.context.updateMessageBlock).not.toHaveBeenCalled();
+});
+
+it('rolls back imported chat data when the existing recovery journal cannot be saved', async () => {
+    const f = workbenchSetup();
+    const { runner, settings } = f.create();
+    const original = structuredClone(f.context.chat);
+    f.storage.setItem = () => {
+        throw new Error('quota');
+    };
+    await expect(runner.importWorldbook(importedBook)).rejects.toMatchObject({ code: 'CHECKPOINT_FAILED' });
+    expect(f.context.chat).toEqual(original);
+    expect(settings.roleBatch).toBeNull();
+    expect(f.context.addOneMessage).not.toHaveBeenCalled();
+});
+
+it('retains committed import records if only the native preview fails to refresh', async () => {
+    const f = workbenchSetup(true);
+    const { runner, settings } = f.create();
+    f.context.updateMessageBlock.mockImplementationOnce(() => {
+        throw new Error('preview failed');
+    });
+    await expect(runner.importWorldbook(importedBook)).rejects.toMatchObject({ code: 'IMPORT_PREVIEW_FAILED' });
+    expect(settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
+    expect(f.recovery.read().names).toEqual(['琴', '安柏']);
+    expect(f.context.chat[2].swipes).toHaveLength(3);
 });

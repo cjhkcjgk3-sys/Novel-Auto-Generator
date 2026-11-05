@@ -1,14 +1,11 @@
 import { abortableDelay, throwIfAborted } from '../../txtToWorldbook/core/requestPolicy.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
-import { hydrateRoleBatch, nextRoleIndex, roleComplete, updateRoleNames } from './roleBatchState.js';
+import { hydrateRoleBatch, nextRoleIndex, roleComplete, updateRoleNames, parseRoleNames } from './roleBatchState.js';
+import { readRoleWorldbook } from './roleWorldbook.js';
 import { isRoleCardTruncated } from './tagFilters.js';
 
 export const ROLE_PLACEHOLDER = '[[角色名]]';
-export const parseRoleNames = (text) =>
-    String(text || '')
-        .split(/\r?\n/)
-        .map((name) => name.trim())
-        .filter(Boolean);
+export { parseRoleNames } from './roleBatchState.js';
 
 /** One sequential batch, using the existing settings and controls. */
 export function createRoleBatchRunner({ getSettings, host, onChange, notify, onStats, onError = () => {}, recovery }) {
@@ -57,10 +54,12 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
     }
     function saveInput() {
         const batch = state();
-        if (!batch || active || preparing) return;
+        if (active || preparing) return;
+        getSettings().totalChapters = parseRoleNames(getSettings().roleNames).length;
+        if (!batch) return;
         batch.inputNames = getSettings().roleNames;
         batch.inputLimit = getSettings().totalChapters;
-        updateRoleNames(batch, parseRoleNames(batch.inputNames).slice(0, Math.max(1, batch.inputLimit)));
+        updateRoleNames(batch, parseRoleNames(batch.inputNames));
         try {
             checkpoint();
         } catch (error) {
@@ -91,7 +90,8 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 throw new Error('请打开写卡助手聊天，并等待当前生成结束');
             if (recovery && typeof initial.identity !== 'string')
                 throw new Error('无法可靠识别当前聊天，暂不能保存恢复进度');
-            const names = parseRoleNames(settings.roleNames).slice(0, Math.max(1, settings.totalChapters));
+            const names = parseRoleNames(settings.roleNames);
+            settings.totalChapters = names.length;
             if (!names.length) throw new Error('请在角色名单中每行填写一个名字');
             let batch = state();
             if (batch && batch.identity !== initial.identity)
@@ -274,6 +274,90 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
         start,
         restore,
         saveInput,
+        async importWorldbook(data, filename = '') {
+            if (active || preparing) throw new Error('请先停止任务，再导入世界书');
+            preparing = true;
+            const settings = getSettings();
+            let previous;
+            let committed = false;
+            try {
+                const imported = readRoleWorldbook(data);
+                restore();
+                previous = { batch: settings.roleBatch, names: settings.roleNames, total: settings.totalChapters };
+                const initial = host.snapshot();
+                if (initial.identity == null || initial.generating === true) throw new Error('请先等待酒馆生成结束');
+                if (recovery && typeof initial.identity !== 'string')
+                    throw new Error('无法可靠识别当前聊天，暂不能保存恢复进度');
+                if (state() && state().identity !== initial.identity)
+                    throw new Error('请返回原聊天后导入；新建任务请使用“从头生成”');
+                if (state()) await host.reconcileRoleBatch(state(), validationOptions());
+                const batch = state()
+                    ? structuredClone(state())
+                    : hydrateRoleBatch({
+                          id: newIdentity('role-batch'),
+                          identity: initial.identity,
+                          ...host.prepareRoleBatch(),
+                          names: [],
+                          items: [],
+                          index: 0,
+                          attempt: 0,
+                          pending: false,
+                      });
+                if (!batch.template.includes(ROLE_PLACEHOLDER))
+                    throw new Error(`最后一条用户消息需要包含 ${ROLE_PLACEHOLDER}`);
+                updateRoleNames(batch, [
+                    ...parseRoleNames(settings.roleNames),
+                    ...imported.roles.map((role) => role.name),
+                ]);
+                const roles = imported.roles.flatMap((role) => {
+                    const item = batch.items.find((item) => item.name === role.name);
+                    return roleComplete(item) ? [] : [{ ...role, item }];
+                });
+                batch.inputNames = batch.names.join('\n');
+                batch.inputLimit = batch.names.length;
+                await host.importRoleResults(batch, { ...imported, roles, filename }, () => {
+                    batch.index = nextRoleIndex(batch);
+                    settings.roleBatch = batch;
+                    settings.roleNames = batch.inputNames;
+                    settings.totalChapters = batch.names.length;
+                    checkpoint();
+                    committed = true;
+                });
+                return {
+                    added: roles.length,
+                    duplicates: imported.duplicates + imported.roles.length - roles.length,
+                    skipped: imported.skipped,
+                };
+            } catch (error) {
+                if (previous && !committed) {
+                    settings.roleBatch = previous.batch;
+                    settings.roleNames = previous.names;
+                    settings.totalChapters = previous.total;
+                }
+                onError(error, { phase: 'import-worldbook' });
+                throw error;
+            } finally {
+                preparing = false;
+                onChange();
+            }
+        },
+        async exportWorldbook() {
+            if (active || preparing) throw new Error('请先停止任务，再导出世界书');
+            preparing = true;
+            try {
+                restore();
+                const batch = state();
+                if (!batch) throw new Error('当前没有角色成果可导出');
+                await host.reconcileRoleBatch(batch, validationOptions());
+                checkpoint();
+                return host.exportRoleWorldbook(batch);
+            } catch (error) {
+                onError(error, { phase: 'export-worldbook' });
+                throw error;
+            } finally {
+                preparing = false;
+            }
+        },
         pause() {
             if (active) {
                 active.paused = true;
