@@ -1,3 +1,4 @@
+import { createRoleSelectionUI } from '../host/roleSelection.js';
 import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
 import { roleComplete, updateRoleNames } from './roleBatchState.js';
@@ -71,9 +72,10 @@ export function initNovelUI(host) {
 
     let settings = {};
     let resultIsolation = null;
+    let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.10.1';
+    const pluginVersion = '1.10.2';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -619,6 +621,21 @@ export function initNovelUI(host) {
         }
         return currentRunner().start();
     }
+    async function rerollCurrentRole() {
+        if (settings.isRunning || fileOperation) return;
+        fileOperation = true;
+        updateUI();
+        try {
+            if (settings.bufferModelStream) await bufferedStream.probe();
+            await roleRunner.rerollSelected();
+        } catch (error) {
+            recordError(error, { phase: 'reroll-prepare' });
+            toastr.warning(error.message);
+        } finally {
+            fileOperation = false;
+            updateUI();
+        }
+    }
     function pauseGeneration() {
         currentRunner().pause();
         toastr.info('当前章节结束后暂停');
@@ -800,6 +817,7 @@ export function initNovelUI(host) {
 
     function updateUI() {
         resultIsolation?.refresh();
+        roleSelection?.refresh();
         const batchMode = settings.generationMode === 'role-batch';
         const batch = settings.roleBatch;
         if (batchMode && batch && !settings.isRunning && !fileOperation) {
@@ -1496,6 +1514,13 @@ export function initNovelUI(host) {
         if (disposed) return;
         loadSettings();
         createUI();
+        roleSelection = createRoleSelectionUI({
+            host,
+            getBatch: () => (settings.generationMode === 'role-batch' ? settings.roleBatch : null),
+            isBusy: () => settings.isRunning || fileOperation,
+            onReroll: rerollCurrentRole,
+        });
+        roleSelection.refresh();
         refreshTimer = setInterval(() => {
             if (settings.isRunning) updateUI();
         }, 1000);
@@ -1514,6 +1539,7 @@ export function initNovelUI(host) {
             disposed = true;
             cleanupHelp?.();
             resultIsolation?.dispose();
+            roleSelection?.dispose();
             bufferedStream.dispose();
             $('#nag-container').remove();
             if (window.nagDebug === debugRawContent) delete window.nagDebug;

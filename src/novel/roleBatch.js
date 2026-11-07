@@ -270,8 +270,122 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
             }
         }
     }
+    async function rerollSelected() {
+        if (active || preparing) return;
+        preparing = true;
+        const settings = getSettings(),
+            initial = host.snapshot();
+        const run = { identity: initial.identity, controller: new AbortController(), paused: false };
+        active = run;
+        settings.isRunning = true;
+        settings.isPaused = false;
+        onChange();
+        let batch,
+            captured,
+            committed = false,
+            promptSent = false;
+        try {
+            restore();
+            batch = state();
+            if (!batch || batch.identity !== initial.identity) throw new Error('请回到原批次聊天后重试');
+            if (initial.generating === true) throw new Error('请先等待酒馆当前生成结束');
+            if (initial.connected === false) throw new Error('酒馆 API 尚未连接');
+            const previousDispatch = batch.pending && batch.dispatch ? { ...batch.dispatch } : null;
+            await host.reconcileRoleBatch(batch, validationOptions());
+            assertCurrent(run);
+            if (previousDispatch?.itemId) {
+                const previousItem = [...batch.items, ...(batch.history || [])].find(
+                    (entry) => entry.id === previousDispatch.itemId,
+                );
+                if (previousItem)
+                    await host.restoreRoleTemplateIfEquals?.(
+                        batch,
+                        batch.template.replaceAll(ROLE_PLACEHOLDER, () => previousItem.name),
+                    );
+            }
+            captured = await host.captureRoleReroll(batch);
+            assertCurrent(run);
+            batch.pending = true;
+            batch.dispatch = { itemId: captured.itemId, attemptId: newIdentity('attempt') };
+            checkpoint();
+            promptSent = true;
+            const reply = await host.generateRoleReply(
+                batch,
+                batch.template.replaceAll(ROLE_PLACEHOLDER, () => captured.name),
+                {
+                    signal: run.controller.signal,
+                    assertCurrent: () => assertCurrent(run),
+                    timeoutMs: settings.replyTimeoutMs || 600000,
+                    validationOptions: validationOptions(),
+                    expectedPrompt: batch.template,
+                },
+            );
+            assertCurrent(run);
+            if (!reply.text?.trim() || reply.truncated || isRoleCardTruncated(reply.text, validationOptions()))
+                throw new Error('新回复为空或未完整结束，原角色内容已保留；部分新回复可能保留在末尾');
+            const committedResult = await host.commitRoleReroll(batch, captured, reply.swipe);
+            committed = true;
+            assertCurrent(run);
+            const item = [...batch.items, ...(batch.history || [])].find((entry) => entry.id === captured.itemId);
+            if (!item) throw Object.assign(new Error('角色记录已变化，请核对聊天'), { uncertain: true });
+            Object.assign(item, {
+                processing: false,
+                processed: true,
+                failed: false,
+                legacy: false,
+                swipe: captured.index,
+            });
+            batch.pending = false;
+            batch.dispatch = null;
+            checkpoint();
+            if (committedResult?.refreshFailed)
+                notify('warning', `${captured.name} 已保存，但页面刷新失败，请重新打开聊天查看`);
+            else notify('success', `${captured.name} 已重新生成，其他备选回复已保留`);
+        } catch (error) {
+            if (batch && captured) batch.pending = !!error.uncertain || run.controller.signal.aborted;
+            if (!run.controller.signal.aborted || committed) {
+                onError(error, { phase: 'reroll-role' });
+                notify(
+                    'warning',
+                    committed
+                        ? `新回复已保存，但后续状态未确认：${error.message}`
+                        : `未确认替换，请核对原角色：${error.message}`,
+                );
+            }
+        } finally {
+            if (captured && !committed) {
+                try {
+                    await host.restoreRoleRerollView(captured);
+                } catch (error) {
+                    onError(error, { phase: 'reroll-restore' });
+                }
+            }
+            if (batch && captured && promptSent && host.snapshot().identity === run.identity) {
+                try {
+                    await host.restoreRoleTemplateIfEquals(
+                        batch,
+                        batch.template.replaceAll(ROLE_PLACEHOLDER, () => captured.name),
+                    );
+                } catch (error) {
+                    onError(error, { phase: 'restore-template' });
+                }
+            }
+            active = null;
+            preparing = false;
+            settings.isRunning = false;
+            settings.isPaused = false;
+            if (batch) {
+                try {
+                    checkpoint();
+                } catch (error) {
+                    onError(error, { phase: 'save-recovery' });
+                }
+            } else onChange();
+        }
+    }
     return {
         start,
+        rerollSelected,
         restore,
         saveInput,
         async importWorldbook(data, filename = '') {

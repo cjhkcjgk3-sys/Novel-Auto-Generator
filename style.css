@@ -731,3 +731,12 @@
         gap: 0;
     }
 }
+
+/* 单个角色重生成，沿用酒馆消息工具栏。 */
+#chat .mes_buttons .nag-reroll-role {
+    font-size: 0.75em;
+    line-height: 1.2;
+    white-space: nowrap;
+    margin: 0 2px;
+    padding: 3px 6px;
+}

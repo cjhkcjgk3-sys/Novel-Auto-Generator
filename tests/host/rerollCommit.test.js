@@ -1,0 +1,164 @@
+import { EventEmitter } from 'node:events';
+import { expect, it, vi } from 'vitest';
+import { createSillyTavernHost } from '../../src/host/sillyTavern.js';
+
+function fixture() {
+    const batch = {
+        id: 'batch',
+        identity: '1:chat',
+        template: '写 [[角色名]]',
+        promptFloor: 1,
+        resultFloor: 2,
+        items: ['甲', '乙', '丙'].map((name, i) => ({ id: `role${i}`, name, swipe: i, processed: true })),
+        history: [],
+    };
+    const infos = batch.items.map((item) => ({
+        extra: {
+            nag_role_batch: { taskId: 'batch', itemId: item.id, status: 'complete', attemptId: `old-${item.id}` },
+            marker: item.name,
+        },
+    }));
+    const context = {
+        characterId: 1,
+        chatId: 'chat',
+        chat: [
+            { mes: '开场' },
+            { is_user: true, mes: '写 [[角色名]]' },
+            {
+                is_user: false,
+                mes: '乙原文',
+                swipe_id: 1,
+                swipes: ['甲原文', '乙原文', '丙原文'],
+                swipe_info: infos,
+                extra: structuredClone(infos[1].extra),
+            },
+        ],
+        eventSource: new EventEmitter(),
+        eventTypes: { MESSAGE_SWIPED: 'message_swiped' },
+        addOneMessage: vi.fn(),
+        updateMessageBlock: vi.fn(),
+    };
+    let disk = structuredClone(context.chat),
+        failSave = false;
+    context.saveChat = vi.fn(async () => {
+        if (!failSave) disk = structuredClone(context.chat);
+    });
+    const syncMesToSwipe = () => {
+        const m = context.chat[2];
+        m.swipes[m.swipe_id] = m.mes;
+        m.swipe_info[m.swipe_id].extra = structuredClone(m.extra);
+        return true;
+    };
+    const syncSwipeToMes = (_floor, index, m) => {
+        m.swipe_id = index;
+        m.mes = m.swipes[index];
+        m.extra = structuredClone(m.swipe_info[index].extra);
+        return true;
+    };
+    const host = createSillyTavernHost({
+        getContext: () => context,
+        getDocument: () => ({ querySelector: () => null }),
+        syncMesToSwipe,
+        syncSwipeToMes,
+        readSavedChat: async () => structuredClone(disk),
+    });
+    function addNew() {
+        context.chat[1].mes = '写 乙';
+        const m = context.chat[2];
+        m.swipes.push('乙新正文');
+        m.swipe_info.push({
+            extra: {
+                nag_role_batch: { taskId: 'batch', itemId: 'role1', status: 'complete', attemptId: 'new-attempt' },
+            },
+        });
+        m.swipe_id = 3;
+        m.mes = m.swipes[3];
+        m.extra = structuredClone(m.swipe_info[3].extra);
+    }
+    return {
+        batch,
+        context,
+        host,
+        addNew,
+        getDisk: () => disk,
+        setFailSave: (value) => {
+            failSave = value;
+        },
+    };
+}
+
+it('replaces the one selected swipe and persists all other bodies and metadata unchanged', async () => {
+    const f = fixture(),
+        captured = await f.host.captureRoleReroll(f.batch),
+        original = structuredClone(captured.baseline);
+    f.addNew();
+    await f.host.commitRoleReroll(f.batch, captured, 3);
+    expect(f.context.chat[2].swipes).toEqual(['甲原文', '乙新正文', '丙原文']);
+    expect(f.getDisk()[2].swipes).toEqual(f.context.chat[2].swipes);
+    expect(f.context.chat[2].swipe_info[0]).toEqual(original.swipe_info[0]);
+    expect(f.context.chat[2].swipe_info[2]).toEqual(original.swipe_info[2]);
+    expect(f.context.chat[2].swipe_id).toBe(1);
+});
+
+it('does not replace any page if another role changes during generation', async () => {
+    const f = fixture(),
+        captured = await f.host.captureRoleReroll(f.batch);
+    f.addNew();
+    f.context.chat[2].swipes[0] = '外部修改';
+    await expect(f.host.commitRoleReroll(f.batch, captured, 3)).rejects.toMatchObject({ uncertain: true });
+    expect(f.context.chat[2].swipes).toEqual(['外部修改', '乙原文', '丙原文', '乙新正文']);
+});
+
+it('detects a save failure swallowed by the host and keeps the old page in memory and on disk', async () => {
+    const f = fixture(),
+        captured = await f.host.captureRoleReroll(f.batch);
+    f.addNew();
+    f.setFailSave(true);
+    await expect(f.host.commitRoleReroll(f.batch, captured, 3)).rejects.toMatchObject({ uncertain: true });
+    expect(f.context.chat[2].swipes[1]).toBe('乙原文');
+    expect(f.getDisk()[2].swipes).toEqual(['甲原文', '乙原文', '丙原文']);
+});
+
+it('reports a display refresh failure after the replacement is safely persisted', async () => {
+    const f = fixture(),
+        captured = await f.host.captureRoleReroll(f.batch);
+    f.addNew();
+    f.context.addOneMessage.mockImplementation(() => {
+        throw new Error('preview failed');
+    });
+    const result = await f.host.commitRoleReroll(f.batch, captured, 3);
+    expect(result.refreshFailed).toBe(true);
+    expect(f.getDisk()[2].swipes).toEqual(['甲原文', '乙新正文', '丙原文']);
+});
+
+it('refuses to overwrite a user-edited prompt template', async () => {
+    const f = fixture();
+    f.context.chat[1].mes = '用户刚编辑过的提示词';
+    await expect(f.host.captureRoleReroll(f.batch)).rejects.toThrow('原始提示词已变化');
+    expect(f.context.chat[1].mes).toBe('用户刚编辑过的提示词');
+    expect(f.context.saveChat).not.toHaveBeenCalled();
+});
+
+it('does not commit if the prompt changes while the model is generating', async () => {
+    const f = fixture();
+    const captured = await f.host.captureRoleReroll(f.batch);
+    f.addNew();
+    f.context.chat[1].mes = '用户刚编辑过的提示词';
+    await expect(f.host.commitRoleReroll(f.batch, captured, 3)).rejects.toMatchObject({ uncertain: true });
+    expect(f.context.chat[1].mes).toBe('用户刚编辑过的提示词');
+    expect(f.context.chat[2].swipes[1]).toBe('乙原文');
+});
+
+it('checks the prompt before dispatch and never overwrites a changed template', async () => {
+    const f = fixture();
+    f.context.chat[1].mes = '用户编辑后的提示词';
+    await expect(
+        f.host.generateRoleReply(f.batch, '写 乙', {
+            signal: new AbortController().signal,
+            assertCurrent: () => {},
+            expectedPrompt: f.batch.template,
+        }),
+    ).rejects.toThrow('原始提示词已变化');
+    expect(f.context.chat[1].mes).toBe('用户编辑后的提示词');
+    expect(f.context.saveChat).not.toHaveBeenCalled();
+});

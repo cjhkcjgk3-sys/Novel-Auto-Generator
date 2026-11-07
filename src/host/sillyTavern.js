@@ -2,8 +2,15 @@ import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
 import { isRoleCardTruncated } from '../novel/tagFilters.js';
 import { createRoleResultIsolation } from './resultIsolation.js';
 import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
-import { ROLE_ENTRY_KEY, ROLE_WORLDBOOK_KEY, writeRoleWorldbook, wrapCodeFence, unwrapCodeFence } from '../novel/roleWorldbook.js';
+import {
+    ROLE_ENTRY_KEY,
+    ROLE_WORLDBOOK_KEY,
+    writeRoleWorldbook,
+    wrapCodeFence,
+    unwrapCodeFence,
+} from '../novel/roleWorldbook.js';
 import { roleComplete } from '../novel/roleBatchState.js';
+import { selectedRole } from './roleSelection.js';
 
 export function getSillyTavernContext() {
     return globalThis.SillyTavern?.getContext?.() ?? globalThis.getContext?.() ?? null;
@@ -19,6 +26,9 @@ export function createSillyTavernHost({
     extensionSettings = {},
     saveSettings = () => {},
     swipeReply = null,
+    syncMesToSwipe = null,
+    syncSwipeToMes = null,
+    readSavedChat = null,
 } = {}) {
     let roleGeneration = null;
     let roleIsolation = null;
@@ -287,22 +297,173 @@ export function createSillyTavernHost({
             .filter(roleComplete)
             .map((item) => ({
                 name: item.name,
-                text: unwrapCodeFence(
-                    item.swipe === (reply.swipe_id ?? 0) ? reply.mes : reply.swipes?.[item.swipe],
-                ),
-                entry:
-                    reply.swipe_info?.[item.swipe]?.extra?.nag_role_batch?.origin === 'worldbook'
-                        ? reply.swipe_info[item.swipe].extra[ROLE_ENTRY_KEY]
-                        : undefined,
+                text: unwrapCodeFence(item.swipe === (reply.swipe_id ?? 0) ? reply.mes : reply.swipes?.[item.swipe]),
+                entry: reply.swipe_info?.[item.swipe]?.extra?.[ROLE_ENTRY_KEY]
+                    ? reply.swipe_info[item.swipe].extra[ROLE_ENTRY_KEY]
+                    : undefined,
             }))
             .filter((result) => typeof result.text === 'string' && result.text.trim());
         return writeRoleWorldbook(results, reply[ROLE_WORLDBOOK_KEY]);
     }
 
+    async function restoreRoleTemplateIfEquals(batch, expected) {
+        if (!batch || snapshot().identity !== batch.identity || getChat()?.[batch.promptFloor]?.mes !== expected)
+            return false;
+        await restoreRoleTemplate(batch);
+        return true;
+    }
+
+    async function captureRoleReroll(batch) {
+        if (roleGeneration || snapshot().generating === true) throw new Error('请先等待当前生成结束');
+        if (![syncMesToSwipe, syncSwipeToMes, readSavedChat].every((fn) => typeof fn === 'function'))
+            throw new Error('当前酒馆缺少安全核对备选回复所需的接口');
+        if (snapshot().identity !== batch.identity) throw new Error('请回到原聊天后重试');
+        const chat = getChat(),
+            message = chat?.[batch.resultFloor];
+        if (chat?.length !== batch.resultFloor + 1) throw new Error('回复楼层已经变化，无法安全重生成');
+        if (!chat[batch.promptFloor]?.is_user || chat[batch.promptFloor].mes !== batch.template)
+            throw new Error('原始提示词已变化，请先核对聊天和批次模板');
+        const selected = selectedRole(batch, message);
+        if (!selected) throw new Error('当前备选页没有可靠的角色记录，无法安全重生成');
+        if (!syncMesToSwipe(batch.resultFloor)) throw new Error('当前备选页无法同步，请先检查聊天');
+        const assertSelection = () => {
+            const current = selectedRole(batch, message);
+            if (
+                snapshot().identity !== batch.identity ||
+                getChat()?.[batch.resultFloor] !== message ||
+                current?.index !== selected.index ||
+                current?.item.id !== selected.item.id ||
+                getChat()?.[batch.promptFloor]?.mes !== batch.template
+            )
+                throw new Error('预备期间聊天、提示词或备选页已变化，未开始重生成');
+        };
+        await roleIsolation?.verify();
+        assertSelection();
+        const baseline = structuredClone(message);
+        await getContext().saveChat();
+        const saved = await readSavedChat(getContext());
+        assertSelection();
+        if (
+            JSON.stringify(message.swipes) !== JSON.stringify(baseline.swipes) ||
+            JSON.stringify(message.swipe_info) !== JSON.stringify(baseline.swipe_info)
+        )
+            throw new Error('预备期间备选回复已变化，未开始重生成');
+        if (
+            JSON.stringify(saved[batch.resultFloor]?.swipes) !== JSON.stringify(baseline.swipes) ||
+            JSON.stringify(saved[batch.resultFloor]?.swipe_info) !== JSON.stringify(baseline.swipe_info)
+        )
+            throw new Error('原有备选回复未能确认保存，请检查酒馆保存状态后重试');
+        return {
+            identity: batch.identity,
+            floor: batch.resultFloor,
+            itemId: selected.item.id,
+            name: selected.item.name,
+            index: selected.index,
+            baseline,
+        };
+    }
+
+    async function commitRoleReroll(batch, captured, generatedIndex) {
+        const context = getContext(),
+            message = getChat()?.[captured.floor];
+        const previous = captured.baseline,
+            count = previous.swipes.length;
+        const fail = () => {
+            throw Object.assign(new Error('备选回复在生成期间发生变化，已保留原结果，请核对聊天'), { uncertain: true });
+        };
+        if (snapshot().identity !== captured.identity || !message || roleGeneration || snapshot().generating === true)
+            fail();
+        if (getChat()?.[batch.promptFloor]?.mes !== batch.template.replaceAll('[[角色名]]', () => captured.name))
+            fail();
+        if (
+            generatedIndex !== count ||
+            message.swipe_id !== count ||
+            message.swipes?.length !== count + 1 ||
+            previous.swipes.some((text, index) => message.swipes[index] !== text) ||
+            previous.swipe_info?.some(
+                (info, index) =>
+                    index !== captured.index && JSON.stringify(info) !== JSON.stringify(message.swipe_info?.[index]),
+            )
+        )
+            fail();
+        const generatedInfo = message.swipe_info?.[count],
+            receipt = generatedInfo?.extra?.nag_role_batch;
+        if (
+            receipt?.taskId !== batch.id ||
+            receipt.itemId !== captured.itemId ||
+            receipt.status !== 'complete' ||
+            typeof message.swipes[count] !== 'string' ||
+            !message.swipes[count].trim()
+        )
+            fail();
+        const next = structuredClone(previous);
+        next.swipes[captured.index] = message.swipes[count];
+        next.swipe_info ??= [];
+        const oldEntry = previous.swipe_info?.[captured.index]?.extra?.[ROLE_ENTRY_KEY];
+        const info = structuredClone(generatedInfo);
+        if (oldEntry) {
+            info.extra ??= {};
+            info.extra[ROLE_ENTRY_KEY] = structuredClone(oldEntry);
+        }
+        next.swipe_info[captured.index] = info;
+        if (!syncSwipeToMes(captured.floor, captured.index, next)) fail();
+        const chat = getChat();
+        chat[captured.floor] = next;
+        try {
+            await context.saveChat();
+            const saved = await readSavedChat(context);
+            if (snapshot().identity !== captured.identity || chat !== getChat() || chat[captured.floor] !== next)
+                throw Object.assign(new Error('保存期间聊天已切换，请回原聊天核对结果'), { uncertain: true });
+            if (
+                JSON.stringify(saved[captured.floor]?.swipes) !== JSON.stringify(next.swipes) ||
+                JSON.stringify(saved[captured.floor]?.swipe_info) !== JSON.stringify(next.swipe_info)
+            )
+                throw Object.assign(new Error('新回复的保存结果无法确认，请保留页面并检查酒馆聊天'), {
+                    uncertain: true,
+                });
+        } catch (error) {
+            if (snapshot().identity === captured.identity && chat === getChat() && chat[captured.floor] === next)
+                chat[captured.floor] = message;
+            throw error;
+        }
+        try {
+            context.addOneMessage(next, { type: 'swipe', forceId: captured.floor, scroll: false });
+            if (context.eventTypes?.MESSAGE_SWIPED)
+                await context.eventSource.emit(context.eventTypes.MESSAGE_SWIPED, captured.floor);
+            return { index: captured.index, refreshFailed: false };
+        } catch {
+            return { index: captured.index, refreshFailed: true };
+        }
+    }
+
+    async function restoreRoleRerollView(captured) {
+        if (!captured || roleGeneration || snapshot().generating === true || snapshot().identity !== captured.identity)
+            return false;
+        const context = getContext(),
+            message = getChat()?.[captured.floor];
+        const previous = captured.baseline.swipes;
+        if (
+            !message ||
+            !Array.isArray(message.swipes) ||
+            message.swipes.length < previous.length ||
+            previous.some((text, index) => message.swipes[index] !== text)
+        )
+            return false;
+        if (message.swipe_id !== captured.index) {
+            if (message.swipe_id < message.swipes.length) syncMesToSwipe(captured.floor);
+            if (!syncSwipeToMes(captured.floor, captured.index, message)) return false;
+            context.addOneMessage(message, { type: 'swipe', forceId: captured.floor, scroll: false });
+            if (context.eventTypes?.MESSAGE_SWIPED)
+                await context.eventSource.emit(context.eventTypes.MESSAGE_SWIPED, captured.floor);
+            await context.saveChat();
+        }
+        return true;
+    }
+
     async function generateRoleReply(
         batch,
         text,
-        { signal, assertCurrent, timeoutMs = 600000, validationOptions = {} },
+        { signal, assertCurrent, timeoutMs = 600000, validationOptions = {}, expectedPrompt },
     ) {
         assertCurrent();
         await roleIsolation?.prepare();
@@ -319,6 +480,8 @@ export function createSillyTavernHost({
         const expectedLength = batch.resultFloor == null ? batch.promptFloor + 1 : batch.resultFloor + 1;
         if (roleGeneration || !prompt?.is_user || messages.length !== expectedLength || snapshot().generating === true)
             throw Object.assign(new Error('聊天结构或生成状态已变化，批量任务已停止'), { uncertain: true });
+        if (expectedPrompt !== undefined && prompt.mes !== expectedPrompt)
+            throw Object.assign(new Error('原始提示词已变化，未发送重生成请求'), { uncertain: true });
         prompt.mes = text;
         if (Array.isArray(prompt.swipes)) prompt.swipes[prompt.swipe_id ?? 0] = text;
         delete prompt.extra?.display_text;
@@ -512,7 +675,12 @@ export function createSillyTavernHost({
         }
     }
     return {
+        getContext,
         getChat,
+        captureRoleReroll,
+        restoreRoleTemplateIfEquals,
+        commitRoleReroll,
+        restoreRoleRerollView,
         async restoreLegacyVisibility() {
             let changed = false;
             for (const message of getChat() || []) {
