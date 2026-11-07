@@ -740,3 +740,21 @@
     margin: 0 2px;
     padding: 3px 6px;
 }
+.nag-role-status-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.nag-role-correction-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.nag-role-correction-actions button {
+    margin: 0;
+    padding: 3px 6px;
+}

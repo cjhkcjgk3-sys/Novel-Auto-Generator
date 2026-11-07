@@ -209,6 +209,10 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                             legacy: false,
                             processing: false,
                             processed: true,
+                            manualStatus:
+                                reply.truncated || isRoleCardTruncated(reply.text, validationOptions())
+                                    ? batch.items[batch.index].manualStatus
+                                    : null,
                             failed: Boolean(
                                 reply.truncated ||
                                 isRoleCardTruncated(reply.text, {
@@ -362,6 +366,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 processing: false,
                 processed: true,
                 failed: false,
+                manualStatus: null,
                 legacy: false,
                 swipe: captured.index,
             });
@@ -418,6 +423,35 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
         rerollSelected,
         restore,
         saveInput,
+        async setRoleStatus(index, status) {
+            if (active || preparing) throw new Error('请先停止任务，再手动纠错');
+            if (!['complete', 'failed', 'auto'].includes(status)) throw new Error('无效的角色状态');
+            restore();
+            const batch = state();
+            if (!batch || batch.identity !== host.snapshot().identity) throw new Error('请回到原批次聊天后纠错');
+            if (host.snapshot().generating === true) throw new Error('请等待酒馆当前生成结束');
+            if (!Number.isInteger(index) || !batch.items[index]) throw new Error('角色名单已变化，请重新选择');
+            preparing = true;
+            const previous = structuredClone(batch);
+            try {
+                await host.reconcileRoleBatch(batch, validationOptions());
+                if (host.snapshot().identity !== batch.identity) throw new Error('聊天已切换，请返回原聊天');
+                const item = batch.items[index];
+                if (!item || item.id !== previous.items[index].id) throw new Error('角色名单已变化，请重新选择');
+                item.manualStatus = status === 'auto' ? null : status;
+                if (status === 'complete') Object.assign(item, { processed: true, failed: false, processing: false });
+                if (status === 'failed') Object.assign(item, { processed: true, failed: true, processing: false });
+                if (status === 'auto') await host.reconcileRoleBatch(batch, validationOptions());
+                if (host.snapshot().identity !== batch.identity) throw new Error('聊天已切换，请返回原聊天');
+                batch.index = nextRoleIndex(batch);
+                checkpoint();
+            } catch (error) {
+                Object.assign(batch, previous);
+                throw error;
+            } finally {
+                preparing = false;
+            }
+        },
         async importWorldbook(data, filename = '') {
             if (active || preparing) throw new Error('请先停止任务，再导入世界书');
             preparing = true;

@@ -135,8 +135,10 @@ export function createSillyTavernHost({
         let changed = false;
         const updates = [];
         for (const item of [...batch.items, ...(batch.history || [])]) {
-            let index = swipes.findIndex((text, swipe) => {
-                const receipt = reply.swipe_info?.[swipe]?.extra?.nag_role_batch;
+            const pendingAttempt =
+                batch.pending && batch.dispatch?.itemId === item.id ? batch.dispatch.attemptId : null;
+            const matching = (text, swipe) => {
+                const receipt = reply?.swipe_info?.[swipe]?.extra?.nag_role_batch;
                 return (
                     receipt?.taskId === batch.id &&
                     receipt.itemId === item.id &&
@@ -145,7 +147,46 @@ export function createSillyTavernHost({
                     text.trim() !== '...' &&
                     (receipt.origin === 'worldbook' || !isRoleCardTruncated(text, validationOptions))
                 );
-            });
+            };
+            const completedAttempt = pendingAttempt
+                ? swipes.findLastIndex(
+                      (text, swipe) =>
+                          matching(text, swipe) &&
+                          reply.swipe_info?.[swipe]?.extra?.nag_role_batch?.attemptId === pendingAttempt,
+                  )
+                : -1;
+            if (item.manualStatus === 'failed' && completedAttempt < 0) {
+                updates.push([item, { processing: false, processed: true, failed: true }]);
+                continue;
+            }
+            if (item.manualStatus === 'complete') {
+                const bound = swipes.findLastIndex((text, swipe) => {
+                    const receipt = reply.swipe_info?.[swipe]?.extra?.nag_role_batch;
+                    return (
+                        receipt?.taskId === batch.id &&
+                        receipt.itemId === item.id &&
+                        !!text?.trim() &&
+                        text.trim() !== '...'
+                    );
+                });
+                const legacy = item.legacy && Number.isInteger(item.swipe) && swipes[item.swipe]?.trim();
+                updates.push([
+                    item,
+                    {
+                        processing: false,
+                        processed: true,
+                        failed: false,
+                        swipe: bound >= 0 ? bound : legacy ? item.swipe : null,
+                    },
+                ]);
+                continue;
+            }
+            let index =
+                completedAttempt >= 0
+                    ? completedAttempt
+                    : Number.isInteger(item.swipe) && matching(swipes[item.swipe], item.swipe)
+                      ? item.swipe
+                      : swipes.findLastIndex(matching);
             if (
                 index < 0 &&
                 item.legacy &&
@@ -171,7 +212,14 @@ export function createSillyTavernHost({
                 if (!item.processed || item.failed || item.legacy) changed = true;
                 updates.push([
                     item,
-                    { processing: false, processed: true, failed: false, swipe: index, legacy: false },
+                    {
+                        processing: false,
+                        processed: true,
+                        failed: false,
+                        swipe: index,
+                        legacy: false,
+                        ...(completedAttempt >= 0 ? { manualStatus: null } : {}),
+                    },
                 ]);
             } else
                 updates.push([
@@ -238,6 +286,7 @@ export function createSillyTavernHost({
             Object.assign(role.item, {
                 processed: true,
                 failed: false,
+                manualStatus: null,
                 processing: false,
                 legacy: false,
                 swipe,

@@ -1,6 +1,7 @@
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
 
-export const roleComplete = (item) => !!item?.processed && !item.failed;
+export const roleComplete = (item) =>
+    item?.manualStatus === 'complete' || (item?.manualStatus !== 'failed' && !!item?.processed && !item.failed);
 export const parseRoleNames = (text) => [
     ...new Set(
         String(text || '')
@@ -44,8 +45,9 @@ export function updateRoleNames(batch, names) {
     batch.items = names.map((name) => {
         const pool = pools.get(name);
         if (!pool?.length) return { id: newIdentity('role'), name };
+        const manual = pool.findIndex((item) => item.manualStatus === 'complete' || item.manualStatus === 'failed');
         const completed = pool.findIndex(roleComplete);
-        return pool.splice(completed < 0 ? 0 : completed, 1)[0];
+        return pool.splice(manual >= 0 ? manual : completed < 0 ? 0 : completed, 1)[0];
     });
     batch.history = [...pools.values()].flat();
     batch.names = names;

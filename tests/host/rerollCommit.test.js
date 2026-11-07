@@ -95,6 +95,34 @@ it('does not overwrite a user-edited prompt when restoring the task template', a
     expect(f.context.saveChat).not.toHaveBeenCalled();
 });
 
+it('keeps a manual failure despite an old completion receipt and recovers a newer completed attempt', async () => {
+    const f = fixture();
+    const item = f.batch.items[1];
+    item.manualStatus = 'failed';
+    item.failed = true;
+    await f.host.reconcileRoleBatch(f.batch);
+    expect(item).toMatchObject({ manualStatus: 'failed', processed: true, failed: true, swipe: 1 });
+    f.addNew();
+    f.batch.pending = true;
+    f.batch.dispatch = { itemId: item.id, attemptId: 'new-attempt' };
+    await f.host.reconcileRoleBatch(f.batch);
+    expect(item).toMatchObject({ manualStatus: null, processed: true, failed: false, swipe: 3 });
+    expect(f.context.chat[2].swipes.slice(0, 3)).toEqual(['甲原文', '乙原文', '丙原文']);
+});
+
+it('binds manually completed results only to their own receipts and never to a stale index', async () => {
+    const f = fixture();
+    const item = f.batch.items[1];
+    item.manualStatus = 'complete';
+    item.swipe = 0;
+    f.context.chat[2].swipe_info[1].extra.nag_role_batch.status = 'partial';
+    await f.host.reconcileRoleBatch(f.batch);
+    expect(item).toMatchObject({ manualStatus: 'complete', processed: true, failed: false, swipe: 1 });
+    delete f.context.chat[2].swipe_info[1].extra.nag_role_batch;
+    await f.host.reconcileRoleBatch(f.batch);
+    expect(item.swipe).toBeNull();
+});
+
 it('replaces the one selected swipe and persists all other bodies and metadata unchanged', async () => {
     const f = fixture(),
         captured = await f.host.captureRoleReroll(f.batch),

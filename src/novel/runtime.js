@@ -15,6 +15,7 @@ export function initNovelUI(host) {
     let disposed = false;
     let cleanupHelp = null;
     let fileOperation = false;
+    let roleCorrection = false;
     const extensionName = 'novel-auto-generator';
 
     const defaultSettings = {
@@ -75,7 +76,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.10.3';
+    const pluginVersion = '1.10.4';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -839,6 +840,11 @@ export function initNovelUI(host) {
         $('#nag-set-total').prop('readOnly', batchMode);
         if (batchMode) $('#nag-set-total').val(roleNames.length);
         $('#nag-role-name-hint, #nag-btn-import-worldbook').toggle(batchMode);
+        $('#nag-role-correction-toggle')
+            .toggle(batchMode && !!batch)
+            .prop('disabled', busy);
+        $('#nag-role-correction-toggle').text(roleCorrection ? '完成纠错' : '手动纠错');
+        $('#nag-role-correction-hint').toggle(batchMode && roleCorrection && !!batch);
         $('#nag-btn-import-worldbook, #nag-btn-export-json').prop('disabled', busy);
         $('#nag-btn-export-json').text(batchMode ? '📦 世界书 JSON' : '📦 JSON');
         $('#nag-btn-export-json').attr(
@@ -859,7 +865,12 @@ export function initNovelUI(host) {
                           .map((name, index) => {
                               const item = batch?.items[index] || {};
                               const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
-                              return `<div class="ttw-memory-item">${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}</div>`;
+                              const manual = item.manualStatus ? '（手动）' : '';
+                              const controls =
+                                  roleCorrection && item.id && !busy
+                                      ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete" ${busy ? 'disabled' : ''}>✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed" ${busy ? 'disabled' : ''}>✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto" ${busy ? 'disabled' : ''}>自动</button></span>`
+                                      : '';
+                              return `<div class="ttw-memory-item nag-role-status-row"><span>${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}</span>${controls}</div>`;
                           })
                           .join('')
                     : '',
@@ -979,6 +990,8 @@ export function initNovelUI(host) {
                         <div class="nag-checkbox-group nag-result-isolation-setting">
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                         </div>
+                        <button type="button" id="nag-role-correction-toggle" class="menu_button" style="display:none">手动纠错</button>
+                        <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
                 </div>
@@ -1196,6 +1209,33 @@ export function initNovelUI(host) {
     }
 
     function bindEvents() {
+        $('#nag-role-correction-toggle').on('click', () => {
+            roleCorrection = !roleCorrection;
+            updateUI();
+        });
+        $('#nag-role-results').on('click', '.nag-role-status-set', async function () {
+            if (settings.isRunning || fileOperation) return;
+            const index = Number(this.dataset.index),
+                status = this.dataset.status;
+            fileOperation = true;
+            updateUI();
+            try {
+                await roleRunner.setRoleStatus(index, status);
+                toastr.success(
+                    status === 'failed'
+                        ? '已标为失败，继续任务时会重新生成'
+                        : status === 'complete'
+                          ? '已手动标为完成'
+                          : '已恢复自动判断',
+                );
+            } catch (error) {
+                recordError(error, { phase: 'correct-role-status' });
+                toastr.warning(error.message);
+            } finally {
+                fileOperation = false;
+                updateUI();
+            }
+        });
         $('#nag-set-buffer-stream').on('change', function () {
             settings.bufferModelStream = Boolean(this.checked);
             saveSettings();
