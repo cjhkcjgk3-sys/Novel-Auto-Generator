@@ -1,3 +1,4 @@
+import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
 import { roleComplete, updateRoleNames } from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
@@ -46,6 +47,7 @@ export function initNovelUI(host) {
 
         // 仅隔离当前批次的结果楼层，保留原生备选数据及纯文本查看。
         isolateRoleResult: false,
+        bufferModelStream: false,
 
         // 导出设置
         exportAll: true,
@@ -71,7 +73,7 @@ export function initNovelUI(host) {
     let resultIsolation = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.10.0';
+    const pluginVersion = '1.10.1';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -551,6 +553,10 @@ export function initNovelUI(host) {
     // 弹窗检测
     // ============================================
 
+    const bufferedStream = createBufferedStream({
+        enabled: () => settings.isRunning && settings.bufferModelStream,
+        onError: (error) => recordError(error, { phase: 'buffered-stream' }),
+    });
     const novelRunner = createNovelRunner({
         recovery: createNovelRecoveryStore(() => localStorage),
         getSettings: () => settings,
@@ -599,6 +605,7 @@ export function initNovelUI(host) {
     async function startGeneration() {
         if (fileOperation) return;
         try {
+            if (settings.bufferModelStream) await bufferedStream.probe();
             await resultIsolation.prepare();
         } catch (error) {
             recordError(error, { phase: 'result-integrity' });
@@ -821,7 +828,7 @@ export function initNovelUI(host) {
             batchMode ? '合并导出已有与新增角色；楼层范围仅用于 TXT 导出' : '导出所选楼层的 JSON',
         );
         $('#nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
-        $('#nag-set-minlen, #nag-set-isolate-result').prop('disabled', busy);
+        $('#nag-set-minlen, #nag-set-isolate-result, #nag-set-buffer-stream').prop('disabled', busy);
         $('.nag-result-isolation-setting').toggle(batchMode);
         $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
         $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
@@ -932,6 +939,8 @@ export function initNovelUI(host) {
                         <button id="nag-btn-stop" class="menu_button" disabled>⏹️ 停止</button>
                     </div>
                     <div class="nag-btn-row"><button id="nag-btn-reset" class="menu_button">🔄 重置</button><button id="nag-btn-restart-role" class="menu_button" style="display:none">从头生成</button></div>
+                    <div class="nag-checkbox-group"><label class="nag-checkbox-label"><input type="checkbox" id="nag-set-buffer-stream"><span>任务流式回复由服务端暂存</span></label></div>
+                    <small class="nag-hint">需要安装服务器缓冲组件。页面恢复后继续接收；服务或模型断开仍可能中断。</small>
                     <div class="nag-btn-row"><button id="nag-btn-error-log" class="menu_button">下载错误日志</button><button id="nag-btn-clear-errors" class="menu_button">清空错误日志</button></div>
                 </div>
 
@@ -1169,6 +1178,10 @@ export function initNovelUI(host) {
     }
 
     function bindEvents() {
+        $('#nag-set-buffer-stream').on('change', function () {
+            settings.bufferModelStream = Boolean(this.checked);
+            saveSettings();
+        });
         $('#nag-btn-start').on('click', startGeneration);
         $('#nag-btn-pause').on('click', pauseGeneration);
         $('#nag-btn-resume').on('click', resumeGeneration);
@@ -1468,6 +1481,7 @@ export function initNovelUI(host) {
         $('#nag-set-retries').val(settings.maxRetries);
         $('#nag-set-minlen').val(settings.minChapterLength);
         $('#nag-set-isolate-result').prop('checked', Boolean(settings.isolateRoleResult));
+        $('#nag-set-buffer-stream').prop('checked', Boolean(settings.bufferModelStream));
         resultIsolation?.refresh();
 
         toggleTagSettings();
@@ -1500,6 +1514,7 @@ export function initNovelUI(host) {
             disposed = true;
             cleanupHelp?.();
             resultIsolation?.dispose();
+            bufferedStream.dispose();
             $('#nag-container').remove();
             if (window.nagDebug === debugRawContent) delete window.nagDebug;
             instance = null;
