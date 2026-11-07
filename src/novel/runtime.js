@@ -75,7 +75,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.10.2';
+    const pluginVersion = '1.10.3';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -975,7 +975,7 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label>生成方式</label><select id="nag-set-mode"><option value="novel">原有自动续写</option><option value="role-batch">同楼层批量生成</option></select></div>
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
-                        <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过；不同作品或形态请在名称中注明。</small>
+                        <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过。修改写卡提示词：先停止任务，在聊天中编辑并保存原提示词楼层，保留 [[角色名]]；继续或重生成时自动使用新提示词。</small>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                         </div>

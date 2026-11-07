@@ -100,6 +100,14 @@ export function createSillyTavernHost({
             prompt = getChat()?.[batch.promptFloor];
         if (!prompt?.is_user) return;
         if (prompt.mes.includes('[[角色名]]') && prompt.mes !== batch.template) return;
+        if (
+            Array.isArray(batch.items) &&
+            prompt.mes !== batch.template &&
+            ![...batch.items, ...(batch.history || [])].some(
+                (item) => item.name && batch.template.replaceAll('[[角色名]]', () => item.name) === prompt.mes,
+            )
+        )
+            return;
         prompt.mes = batch.template;
         if (Array.isArray(prompt.swipes)) prompt.swipes[prompt.swipe_id ?? 0] = batch.template;
         delete prompt.extra?.display_text;
@@ -311,6 +319,14 @@ export function createSillyTavernHost({
             return false;
         await restoreRoleTemplate(batch);
         return true;
+    }
+
+    function readRoleTemplate(batch) {
+        if (!batch || snapshot().identity !== batch.identity) throw new Error('请返回原聊天后修改提示词');
+        if (roleGeneration || snapshot().generating === true) throw new Error('请等待酒馆生成结束后修改提示词');
+        const prompt = getChat()?.[batch.promptFloor];
+        if (!prompt?.is_user || typeof prompt.mes !== 'string') throw new Error('任务对应的用户提示词楼层已变化');
+        return prompt.mes;
     }
 
     async function captureRoleReroll(batch) {
@@ -678,6 +694,7 @@ export function createSillyTavernHost({
         getContext,
         getChat,
         captureRoleReroll,
+        readRoleTemplate,
         restoreRoleTemplateIfEquals,
         commitRoleReroll,
         restoreRoleRerollView,

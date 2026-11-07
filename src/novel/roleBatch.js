@@ -71,6 +71,32 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
         throwIfAborted(run.controller.signal);
         if (host.snapshot().identity !== run.identity) throw new Error('聊天已切换，批量生成已停止');
     }
+    async function syncEditedTemplate(batch, run) {
+        if (!host.readRoleTemplate) return;
+        let current = host.readRoleTemplate(batch);
+        if (!current.includes(ROLE_PLACEHOLDER)) {
+            // A stopped generation can leave its role-substituted prompt in the chat.
+            const matches = [...batch.items, ...(batch.history || [])].some(
+                (item) => item.name && batch.template.replaceAll(ROLE_PLACEHOLDER, () => item.name) === current,
+            );
+            if (matches) {
+                await host.restoreRoleTemplateIfEquals(batch, current);
+                assertCurrent(run);
+                current = host.readRoleTemplate(batch);
+            }
+        }
+        if (!current.includes(ROLE_PLACEHOLDER))
+            throw new Error(`提示词需要包含 ${ROLE_PLACEHOLDER}，请修改并保存聊天中的提示词`);
+        if (current === batch.template) return;
+        const previous = batch.template;
+        batch.template = current;
+        try {
+            checkpoint();
+        } catch (error) {
+            batch.template = previous;
+            throw error;
+        }
+    }
     async function start() {
         if (active || preparing) return;
         preparing = true;
@@ -114,6 +140,8 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
             }
             if (host.reconcileRoleBatch) await host.reconcileRoleBatch(batch, validationOptions());
             else if (batch.pending) throw new Error('上一轮尚未确认结束，请先查看聊天结果');
+            assertCurrent(run);
+            await syncEditedTemplate(batch, run);
             assertCurrent(run);
             updateRoleNames(batch, names);
             batch.inputNames = settings.roleNames;
@@ -303,6 +331,8 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                         batch.template.replaceAll(ROLE_PLACEHOLDER, () => previousItem.name),
                     );
             }
+            await syncEditedTemplate(batch, run);
+            assertCurrent(run);
             captured = await host.captureRoleReroll(batch);
             assertCurrent(run);
             batch.pending = true;

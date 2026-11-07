@@ -87,6 +87,14 @@ function fixture() {
     };
 }
 
+it('does not overwrite a user-edited prompt when restoring the task template', async () => {
+    const f = fixture();
+    f.context.chat[1].mes = '用户正在修改的提示词';
+    await f.host.restoreRoleTemplate(f.batch);
+    expect(f.context.chat[1].mes).toBe('用户正在修改的提示词');
+    expect(f.context.saveChat).not.toHaveBeenCalled();
+});
+
 it('replaces the one selected swipe and persists all other bodies and metadata unchanged', async () => {
     const f = fixture(),
         captured = await f.host.captureRoleReroll(f.batch),
