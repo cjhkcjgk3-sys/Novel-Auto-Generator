@@ -456,6 +456,8 @@ export function createSillyTavernHost({
         if (
             receipt?.taskId !== batch.id ||
             receipt.itemId !== captured.itemId ||
+            !batch.dispatch?.attemptId ||
+            receipt.attemptId !== batch.dispatch.attemptId ||
             receipt.status !== 'complete' ||
             typeof message.swipes[count] !== 'string' ||
             !message.swipes[count].trim()
@@ -557,6 +559,7 @@ export function createSillyTavernHost({
         const previousReply = reply ? structuredClone(reply) : null;
         const expectedSwipe = reply ? Math.max(1, reply.swipes?.length || 0) : 0;
         const operation = batch.id && batch.dispatch ? { taskId: batch.id, ...batch.dispatch } : null;
+        const existingErrorNotices = new Set(getDocument()?.querySelectorAll?.('#toast-container .toast-error') || []);
         function markReceipt(status, textHash) {
             if (!operation || snapshot().identity !== identity || signal?.aborted) return;
             const message = messages[batch.resultFloor ?? batch.promptFloor + 1];
@@ -683,13 +686,24 @@ export function createSillyTavernHost({
                 batch.resultFloor = batch.promptFloor + 1;
             reply = messages[batch.resultFloor];
             if (!reply || reply.is_user) return { text: '', swipe: null, truncated: false };
-            if (messages.length !== batch.resultFloor + 1 || reply.swipe_id !== expectedSwipe)
-                throw Object.assign(new Error('酒馆未切换到本轮候选页，已停止；请下载错误日志'), {
-                    uncertain: true,
-                    phase: 'select-swipe',
-                    expectedSwipe,
-                    actualSwipe: reply.swipe_id,
-                });
+            if (messages.length !== batch.resultFloor + 1 || reply.swipe_id !== expectedSwipe) {
+                const notices = getDocument()?.querySelectorAll?.('#toast-container .toast-error') || [];
+                const hostErrorNotice = [...notices].some((notice) => !existingErrorNotices.has(notice));
+                throw Object.assign(
+                    new Error(
+                        hostErrorNotice
+                            ? '酒馆生成后退回旧候选页，检测到酒馆错误提示；请查看酒馆的 API 错误信息，原结果已保留'
+                            : '酒馆生成后退回旧候选页，原因尚未确认；请查看酒馆错误提示并保留原结果',
+                    ),
+                    {
+                        uncertain: true,
+                        phase: 'select-swipe',
+                        hostErrorNotice,
+                        expectedSwipe,
+                        actualSwipe: reply.swipe_id,
+                    },
+                );
+            }
             // Core streaming failures can resolve normally and leave the initial "..." in chat.
             await roleIsolation?.verify();
             const text = String(reply.mes || '');

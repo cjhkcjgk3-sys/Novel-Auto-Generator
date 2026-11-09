@@ -69,6 +69,7 @@ export function createErrorRecord(error, details = {}) {
         'generating',
         'pending',
         'uncertain',
+        'hostErrorNotice',
         'status',
     ]) {
         const value = details[key] ?? error?.[key];

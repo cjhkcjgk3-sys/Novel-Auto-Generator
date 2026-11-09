@@ -294,6 +294,31 @@ it('does not accept existing content when native swipe never starts a generation
     expect(context.generate).not.toHaveBeenCalled();
 });
 
+it('reports a new host error when a started swipe returns to the previous page', async () => {
+    const { context } = batchSetup();
+    const oldNotice = {},
+        newNotice = {};
+    let notices = [oldNotice];
+    const host = createSillyTavernHost({
+        getContext: () => context,
+        getDocument: () => ({ querySelector: () => null, querySelectorAll: () => notices }),
+        swipeReply: async () => {
+            context.eventSource.emit(context.eventTypes.GENERATION_STARTED, 'swipe');
+            notices = [oldNotice, newNotice];
+        },
+    });
+    await expect(
+        host.generateRoleReply(host.prepareRoleBatch(), '生成 安柏', { assertCurrent() {} }),
+    ).rejects.toMatchObject({
+        phase: 'select-swipe',
+        hostErrorNotice: true,
+        expectedSwipe: 1,
+        actualSwipe: 0,
+        uncertain: true,
+    });
+    expect(context.chat[2].swipes).toEqual(['旧成品']);
+});
+
 it('writes completion receipts before native generation returns, so recovery can adopt a saved result', async () => {
     const { host, context } = batchSetup(false);
     const batch = {

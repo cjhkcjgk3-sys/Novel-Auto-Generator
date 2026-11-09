@@ -11,6 +11,7 @@ function fixture() {
         resultFloor: 2,
         items: ['甲', '乙', '丙'].map((name, i) => ({ id: `role${i}`, name, swipe: i, processed: true })),
         history: [],
+        dispatch: { itemId: 'role1', attemptId: 'new-attempt' },
     };
     const infos = batch.items.map((item) => ({
         extra: {
@@ -143,6 +144,15 @@ it('does not replace any page if another role changes during generation', async 
     f.context.chat[2].swipes[0] = '外部修改';
     await expect(f.host.commitRoleReroll(f.batch, captured, 3)).rejects.toMatchObject({ uncertain: true });
     expect(f.context.chat[2].swipes).toEqual(['外部修改', '乙原文', '丙原文', '乙新正文']);
+});
+
+it('refuses a completed candidate from a different generation attempt', async () => {
+    const f = fixture();
+    const captured = await f.host.captureRoleReroll(f.batch);
+    f.addNew();
+    f.context.chat[2].swipe_info[3].extra.nag_role_batch.attemptId = 'older-attempt';
+    await expect(f.host.commitRoleReroll(f.batch, captured, 3)).rejects.toMatchObject({ uncertain: true });
+    expect(f.context.chat[2].swipes.slice(0, 3)).toEqual(['甲原文', '乙原文', '丙原文']);
 });
 
 it('detects a save failure swallowed by the host and keeps the old page in memory and on disk', async () => {
