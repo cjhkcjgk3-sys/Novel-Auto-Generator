@@ -90,12 +90,27 @@ export function isRoleCardTruncated(text, options = {}) {
 
     // 3. XML / 自定义成对标签首尾闭合检查
     const openTags = [];
-    const tagPattern = /<\s*([a-zA-Z\u4e00-\u9fa5_][a-zA-Z0-9\u4e00-\u9fa5_-]*)(?:\s[^>]*)?(\/?)>/g;
+    const tagPattern = /<\s*([a-zA-Z\u4e00-\u9fa5_][a-zA-Z0-9\u4e00-\u9fa5_-]*)(?:\s[^>]*)?\s*\/?>/g;
+    const voidTags = new Set([
+        'area',
+        'base',
+        'br',
+        'col',
+        'embed',
+        'hr',
+        'img',
+        'input',
+        'link',
+        'meta',
+        'param',
+        'source',
+        'track',
+        'wbr',
+    ]);
     let match;
     while ((match = tagPattern.exec(trimmed)) !== null) {
         const tagName = match[1].toLowerCase();
-        const isSelfClosing = match[2] === '/';
-        if (isSelfClosing) continue;
+        if (voidTags.has(tagName) || /\/\s*>$/.test(match[0])) continue;
         openTags.push(tagName);
     }
 
@@ -116,7 +131,7 @@ export function isRoleCardTruncated(text, options = {}) {
 
     // 5. 常见截断停顿标点（句子说到一半硬断掉）
     if (trimmed.length >= 20) {
-        const trailingHangingPattern = /[，,、:：\\/（([【{“"‘'\-~—]\s*$/;
+        const trailingHangingPattern = /[，,、:：\\/（([【{\-~—]\s*$/;
         if (trailingHangingPattern.test(trimmed)) {
             return true;
         }

@@ -12,6 +12,18 @@ it('preserves extraction and exclusion when moved out of the entry module', () =
     ).toBe('内容');
 });
 
+it('accepts complete quoted character data, HTML void elements and self-closing tags with attributes', () => {
+    for (const text of [
+        'name: 碧蓝航线·俾斯麦Zwei\ndescription: "完整的人物描述，性格坚毅。"',
+        "name: 碧蓝航线·乌尔里希·冯·胡滕\ndescription: '完整的人物描述。'",
+        '<character_design_complex>\n人物介绍<br>第二行<img src="头像.png">\n</character_design_complex>',
+        '<character><portrait type="avatar" /><name>亚德</name></character>',
+        '```yaml\nname: "碧蓝航线·兴登堡"\n```',
+    ])
+        expect(isRoleCardTruncated(text)).toBe(false);
+    expect(isRoleCardTruncated('<character><portrait type="avatar" /><name>亚德</name>')).toBe(true);
+});
+
 it('treats regex characters in tag names literally', () => {
     expect(applyTagFilters('<a.b>正确</a.b><axb>错误</axb>', { extractMode: 'tags', extractTags: ['a.b'] })).toBe(
         '正确',

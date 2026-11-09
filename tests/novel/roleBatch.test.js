@@ -203,3 +203,17 @@ it('marks unclosed role card tags as truncated failure instead of completed', as
     expect(host.generateRoleReply).toHaveBeenCalledTimes(1);
     expect(settings.roleBatch.items[0]).toMatchObject({ name: '琴', failed: true });
 });
+
+it('accepts complete quoted or HTML-formatted cards for names containing middots and Latin letters', async () => {
+    vi.useFakeTimers();
+    const { settings, host, runner } = setup([
+        { text: 'name: "碧蓝航线·俾斯麦Zwei"\ndescription: "完整的人物设定。"' },
+        { text: '<character>完整的人物设定<br><portrait type="avatar" /></character>' },
+    ]);
+    settings.roleNames = '碧蓝航线·俾斯麦Zwei\n碧蓝航线·乌尔里希·冯·胡滕';
+    const task = runner.start();
+    await vi.runAllTimersAsync();
+    await task;
+    expect(host.generateRoleReply).toHaveBeenCalledTimes(2);
+    expect(settings.roleBatch.items.map((item) => item.failed)).toEqual([false, false]);
+});
