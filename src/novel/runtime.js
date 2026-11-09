@@ -49,6 +49,8 @@ export function initNovelUI(host) {
 
         // 仅隔离当前批次的结果楼层，保留原生备选数据及纯文本查看。
         isolateRoleResult: false,
+        // 单角色重生成先在末尾生成候选版本，由用户确认后才替换原页；关闭则生成完成后自动替换。
+        rerollConfirm: true,
         bufferModelStream: false,
 
         // 导出设置
@@ -76,7 +78,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.10.6';
+    const pluginVersion = '1.11.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -588,7 +590,7 @@ export function initNovelUI(host) {
             saveSettings();
             updateUI();
         },
-        notify: (type, message) => toastr[type](message),
+        notify: (type, message, options) => toastr[type](message, undefined, options),
         onStats: (stats) => {
             generationStats = stats;
         },
@@ -631,6 +633,20 @@ export function initNovelUI(host) {
             await roleRunner.rerollSelected();
         } catch (error) {
             recordError(error, { phase: 'reroll-prepare' });
+            toastr.warning(error.message);
+        } finally {
+            fileOperation = false;
+            updateUI();
+        }
+    }
+    async function runRoleAction(action, phase) {
+        if (settings.isRunning || fileOperation) return;
+        fileOperation = true;
+        updateUI();
+        try {
+            await action();
+        } catch (error) {
+            recordError(error, { phase });
             toastr.warning(error.message);
         } finally {
             fileOperation = false;
@@ -852,7 +868,10 @@ export function initNovelUI(host) {
             batchMode ? '合并导出已有与新增角色；楼层范围仅用于 TXT 导出' : '导出所选楼层的 JSON',
         );
         $('#nag-set-autosave, #nag-set-retries').prop('disabled', batchMode);
-        $('#nag-set-minlen, #nag-set-isolate-result, #nag-set-buffer-stream').prop('disabled', busy);
+        $('#nag-set-minlen, #nag-set-isolate-result, #nag-set-reroll-confirm, #nag-set-buffer-stream').prop(
+            'disabled',
+            busy,
+        );
         $('.nag-result-isolation-setting').toggle(batchMode);
         $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
         $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
@@ -989,6 +1008,7 @@ export function initNovelUI(host) {
                         <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过。修改写卡提示词：先停止任务，在聊天中编辑并保存原提示词楼层，保留 [[角色名]]；继续或重生成时自动使用新提示词。</small>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
+                            <label class="nag-checkbox-label" title="开启：重生成此角色时新内容先作为候选版本放在末尾，确认“用这版替换”后才替换原页，可“再生成一版”比较或“放弃”。关闭：生成完成并校验通过后自动替换"><input type="checkbox" id="nag-set-reroll-confirm"><span>重生成后手动确认</span></label>
                         </div>
                         <button type="button" id="nag-role-correction-toggle" class="menu_button" style="display:none">手动纠错</button>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
@@ -1235,6 +1255,12 @@ export function initNovelUI(host) {
                 fileOperation = false;
                 updateUI();
             }
+        });
+        $('#nag-set-reroll-confirm').on('change', function () {
+            settings.rerollConfirm = Boolean(this.checked);
+            saveSettings();
+            if (!settings.rerollConfirm && roleRunner.previewPending())
+                toastr.info('已关闭手动确认；当前待确认的候选版本仍需“用这版替换”或“放弃”');
         });
         $('#nag-set-buffer-stream').on('change', function () {
             settings.bufferModelStream = Boolean(this.checked);
@@ -1539,6 +1565,7 @@ export function initNovelUI(host) {
         $('#nag-set-retries').val(settings.maxRetries);
         $('#nag-set-minlen').val(settings.minChapterLength);
         $('#nag-set-isolate-result').prop('checked', Boolean(settings.isolateRoleResult));
+        $('#nag-set-reroll-confirm').prop('checked', settings.rerollConfirm !== false);
         $('#nag-set-buffer-stream').prop('checked', Boolean(settings.bufferModelStream));
         resultIsolation?.refresh();
 
@@ -1559,6 +1586,16 @@ export function initNovelUI(host) {
             getBatch: () => (settings.generationMode === 'role-batch' ? settings.roleBatch : null),
             isBusy: () => settings.isRunning || fileOperation,
             onReroll: rerollCurrentRole,
+            onPreview: {
+                accept: () => runRoleAction(() => roleRunner.acceptPreview(), 'preview-accept'),
+                again: () =>
+                    runRoleAction(async () => {
+                        if (settings.bufferModelStream) await bufferedStream.probe();
+                        await roleRunner.rerollPreviewAgain();
+                    }, 'preview-reroll'),
+                discard: () => runRoleAction(() => roleRunner.discardPreview(), 'preview-discard'),
+            },
+            notify: (type, message) => toastr[type](message),
         });
         roleSelection.refresh();
         refreshTimer = setInterval(() => {

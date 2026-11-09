@@ -94,7 +94,7 @@ it('does not claim success when saving or verification cannot be confirmed', asy
     expect(batch.items[1].swipe).toBe(1);
     expect(batch.pending).toBe(true);
     expect(notify).not.toHaveBeenCalledWith('success', expect.anything());
-    expect(notify).toHaveBeenCalledWith('warning', expect.stringContaining('保存未确认'));
+    expect(notify).toHaveBeenCalledWith('warning', expect.stringContaining('保存未确认'), expect.anything());
 });
 
 it('reports a refresh failure accurately after saving rather than claiming the old response remains', async () => {
