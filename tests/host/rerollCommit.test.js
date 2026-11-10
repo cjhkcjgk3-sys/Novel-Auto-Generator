@@ -88,6 +88,18 @@ function fixture() {
     };
 }
 
+it('asks before generating when an existing page has no reliable role binding', async () => {
+    const f = fixture();
+    const confirm = vi.fn(async () => false);
+    f.context.Popup = { show: { confirm } };
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+    f.context.chat[2].swipes.push('其他来源的角色卡');
+    f.context.chat[2].swipe_info.push({});
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(false);
+    expect(confirm).toHaveBeenCalledOnce();
+});
+
 it('does not overwrite a user-edited prompt when restoring the task template', async () => {
     const f = fixture();
     f.context.chat[1].mes = '用户正在修改的提示词';

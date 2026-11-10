@@ -172,6 +172,8 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 notify('info', '名单已全部完成，已有成品已跳过；需要重做请用“从头生成”');
                 return;
             }
+            if (host.confirmUnidentifiedRolePages && !(await host.confirmUnidentifiedRolePages(batch))) return;
+            assertCurrent(run);
             if (host.snapshot().connected === false) throw new Error('酒馆 API 尚未连接，请连接后继续任务');
             ready = true;
         } catch (error) {

@@ -1,7 +1,56 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRoleBatchRunner, parseRoleNames } from '../../src/novel/roleBatch.js';
+import { countUnidentifiedRolePages, duplicateRoleNames } from '../../src/novel/roleBatchState.js';
 
 afterEach(() => vi.useRealTimers());
+
+it('detects duplicate full names without merging works, variants or case', () => {
+    const names = ' 碧蓝航线·俾斯麦 \n碧蓝航线·俾斯麦Zwei\n其他作品·俾斯麦\n碧蓝航线·俾斯麦\n碧蓝航线·俾斯麦zwei';
+    expect(duplicateRoleNames(names)).toEqual(['碧蓝航线·俾斯麦']);
+    expect(parseRoleNames(names)).toEqual([
+        '碧蓝航线·俾斯麦',
+        '碧蓝航线·俾斯麦Zwei',
+        '其他作品·俾斯麦',
+        '碧蓝航线·俾斯麦zwei',
+    ]);
+});
+
+it('reports old pages without a reliable role binding and ignores pending preview pages', () => {
+    const batch = { id: 'b', items: [{ id: 'a', name: '碧蓝航线·俾斯麦', swipe: 0 }], history: [] };
+    const message = {
+        swipes: ['已生成', '身份未知', '候选中'],
+        swipe_info: [
+            { extra: { nag_role_batch: { taskId: 'b', itemId: 'a', status: 'complete' } } },
+            {},
+            { extra: { nag_role_batch: { taskId: 'b', itemId: 'a', previewId: 'p' } } },
+        ],
+    };
+    expect(countUnidentifiedRolePages(batch, message)).toBe(1);
+    expect(countUnidentifiedRolePages(null, message)).toBe(2);
+    expect(countUnidentifiedRolePages(null, { mes: '未建立备选页的旧回复' })).toBe(1);
+});
+
+it('recognizes 1000 recorded role pages without treating distinct names as duplicates', () => {
+    const items = Array.from({ length: 1000 }, (_, i) => ({ id: `id${i}`, name: `作品·角色${i}`, swipe: i }));
+    const batch = { id: 'batch', items, history: [] };
+    const message = {
+        swipes: items.map((item) => `正文 ${item.name}`),
+        swipe_info: items.map((item) => ({ extra: { nag_role_batch: { taskId: 'batch', itemId: item.id } } })),
+    };
+    expect(countUnidentifiedRolePages(batch, message)).toBe(0);
+    expect(duplicateRoleNames(items.map((item) => item.name).join('\n'))).toEqual([]);
+    message.swipe_info[500] = {};
+    expect(countUnidentifiedRolePages(batch, message)).toBe(1);
+});
+
+it('does not generate if the user declines to continue past unidentified old pages', async () => {
+    const { host, runner, settings } = setup();
+    host.confirmUnidentifiedRolePages = vi.fn(async () => false);
+    await runner.start();
+    expect(host.confirmUnidentifiedRolePages).toHaveBeenCalledOnce();
+    expect(host.generateRoleReply).not.toHaveBeenCalled();
+    expect(settings.isRunning).toBe(false);
+});
 function setup(replies = [{ text: '结果' }]) {
     const settings = { roleNames: '琴\n安柏\n丽莎', totalChapters: 3, replyWaitTime: 0, roleBatch: null };
     const snapshot = { identity: 'chat-a', generating: false };

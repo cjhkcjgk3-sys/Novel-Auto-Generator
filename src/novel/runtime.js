@@ -1,7 +1,7 @@
 import { createRoleSelectionUI } from '../host/roleSelection.js';
 import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
-import { roleComplete, updateRoleNames } from './roleBatchState.js';
+import { countUnidentifiedRolePages, duplicateRoleNames, roleComplete, updateRoleNames } from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
@@ -78,7 +78,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.11.0';
+    const pluginVersion = '1.11.1';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -856,6 +856,28 @@ export function initNovelUI(host) {
         $('#nag-set-total').prop('readOnly', batchMode);
         if (batchMode) $('#nag-set-total').val(roleNames.length);
         $('#nag-role-name-hint, #nag-btn-import-worldbook').toggle(batchMode);
+        const repeatedNames = batchMode ? duplicateRoleNames(settings.roleNames) : [];
+        $('#nag-role-duplicate-hint')
+            .toggle(repeatedNames.length > 0)
+            .text(
+                repeatedNames.length
+                    ? `名单中有 ${repeatedNames.length} 个重复全名，保存后自动去重：${repeatedNames.slice(0, 5).join('、')}${repeatedNames.length > 5 ? '…' : ''}`
+                    : '',
+            );
+        const currentBatch = batch?.identity === host.snapshot().identity ? batch : null;
+        const chat = batchMode ? host.getChat() : null;
+        const result = currentBatch?.resultFloor != null ? chat?.[currentBatch.resultFloor] : chat?.at(-1);
+        const unknownPages =
+            batchMode && result && !result.is_user && !result.is_system
+                ? countUnidentifiedRolePages(currentBatch, result)
+                : 0;
+        $('#nag-role-unidentified-hint')
+            .toggle(unknownPages > 0)
+            .text(
+                unknownPages
+                    ? `有 ${unknownPages} 条备选回复缺少可核对的当前批次角色记录，无法自动判断是否同名；请先人工核对。`
+                    : '',
+            );
         $('#nag-role-correction-toggle')
             .toggle(batchMode && !!batch)
             .prop('disabled', busy);
@@ -1006,6 +1028,8 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
                         <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过。修改写卡提示词：先停止任务，在聊天中编辑并保存原提示词楼层，保留 [[角色名]]；继续或重生成时自动使用新提示词。</small>
+                        <small id="nag-role-duplicate-hint" class="nag-hint" style="display:none"></small>
+                        <small id="nag-role-unidentified-hint" class="nag-hint" style="display:none"></small>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                             <label class="nag-checkbox-label" title="开启：重生成此角色时新内容先作为候选版本放在末尾，确认“用这版替换”后才替换原页，可“再生成一版”比较或“放弃”。关闭：生成完成并校验通过后自动替换"><input type="checkbox" id="nag-set-reroll-confirm"><span>重生成后手动确认</span></label>
@@ -1485,9 +1509,11 @@ export function initNovelUI(host) {
         });
         $('#nag-set-prompt').on('change', function () {
             if (settings.generationMode !== 'role-batch') return;
+            const duplicates = duplicateRoleNames(settings.roleNames);
             settings.roleNames = parseRoleNames(settings.roleNames).join('\n');
             $(this).val(settings.roleNames);
             roleRunner.saveInput();
+            if (duplicates.length) toastr.info(`已去除 ${duplicates.length} 个重复全名；不同作品或版本不会合并`);
         });
         $('#nag-set-autosave').on('change', function () {
             settings.autoSaveInterval = +$(this).val() || 50;

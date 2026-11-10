@@ -9,7 +9,7 @@ import {
     wrapCodeFence,
     unwrapCodeFence,
 } from '../novel/roleWorldbook.js';
-import { roleComplete } from '../novel/roleBatchState.js';
+import { countUnidentifiedRolePages, roleComplete } from '../novel/roleBatchState.js';
 import { selectedRole } from './roleSelection.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
 
@@ -994,6 +994,18 @@ export function createSillyTavernHost({
         snapshot,
         send,
         prepareRoleBatch,
+        async confirmUnidentifiedRolePages(batch) {
+            if (snapshot().identity !== batch.identity) throw new Error('请返回原聊天后核对角色');
+            const message = getChat()?.[batch.resultFloor];
+            const count = countUnidentifiedRolePages(batch, message);
+            if (!count) return true;
+            if (typeof getContext()?.Popup?.show?.confirm !== 'function')
+                throw new Error(`有 ${count} 条备选回复无法识别角色名称，请先核对后再继续`);
+            return !!(await getContext().Popup.show.confirm(
+                '存在无法识别的已有角色',
+                `有 ${count} 条已有备选回复缺少当前批次的角色记录，无法判断是否与名单同名。请先核对，确认仍要继续生成吗？`,
+            ));
+        },
         generateRoleReply,
         restoreRoleTemplate,
         reconcileRoleBatch,

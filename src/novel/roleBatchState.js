@@ -10,6 +10,40 @@ export const parseRoleNames = (text) => [
             .filter(Boolean),
     ),
 ];
+
+/** Report repeated full names without changing spelling or combining different works/forms. */
+export function duplicateRoleNames(text) {
+    const seen = new Set(),
+        duplicates = new Set();
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const name = line.trim();
+        if (!name) continue;
+        if (seen.has(name)) duplicates.add(name);
+        else seen.add(name);
+    }
+    return [...duplicates];
+}
+
+/** Count pages whose role identity is not backed by the current batch's existing records. */
+export function countUnidentifiedRolePages(batch, message) {
+    if (!message) return 0;
+    const swipes = Array.isArray(message.swipes) && message.swipes.length ? message.swipes : [message.mes];
+    const bindings = new Map();
+    for (const item of [...(batch?.items || []), ...(batch?.history || [])]) {
+        if (!Number.isInteger(item.swipe)) continue;
+        if (!bindings.has(item.swipe)) bindings.set(item.swipe, []);
+        bindings.get(item.swipe).push(item);
+    }
+    return swipes.reduce((count, text, index) => {
+        if (typeof text !== 'string' || !text.trim() || text.trim() === '...') return count;
+        const receipt = message.swipe_info?.[index]?.extra?.nag_role_batch;
+        if (receipt?.previewId) return count;
+        const known = (bindings.get(index) || []).some(
+            (item) => (receipt?.taskId === batch?.id && receipt.itemId === item.id) || (!receipt && item.legacy),
+        );
+        return count + (known ? 0 : 1);
+    }, 0);
+}
 export const nextRoleIndex = (batch) => {
     const index = batch.items.findIndex((item) => !roleComplete(item));
     return index < 0 ? batch.names.length : index;
