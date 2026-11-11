@@ -9,7 +9,7 @@ import {
     wrapCodeFence,
     unwrapCodeFence,
 } from '../novel/roleWorldbook.js';
-import { countUnidentifiedRolePages, roleComplete } from '../novel/roleBatchState.js';
+import { countUnidentifiedRolePages, roleComplete, unidentifiedRolePageSignature } from '../novel/roleBatchState.js';
 import { selectedRole } from './roleSelection.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
 
@@ -1100,12 +1100,17 @@ export function createSillyTavernHost({
             const message = getChat()?.[batch.resultFloor];
             const count = countUnidentifiedRolePages(batch, message);
             if (!count) return true;
+            const signature = unidentifiedRolePageSignature(batch, message);
+            // The user already reviewed exactly these pages; do not gate every resume on them again.
+            if (signature && batch.unidentifiedSignature === signature) return true;
             if (typeof getContext()?.Popup?.show?.confirm !== 'function')
                 throw new Error(`有 ${count} 条备选回复无法识别角色名称，请先核对后再继续`);
-            return !!(await getContext().Popup.show.confirm(
+            const confirmed = !!(await getContext().Popup.show.confirm(
                 '存在无法识别的已有角色',
-                `有 ${count} 条已有备选回复缺少当前批次的角色记录，无法判断是否与名单同名。请先核对，确认仍要继续生成吗？`,
+                `有 ${count} 条已有备选回复缺少当前批次的角色记录，无法判断是否与名单同名。请先核对；确认后本轮不再重复询问，仍要继续生成吗？`,
             ));
+            if (confirmed) batch.unidentifiedSignature = signature;
+            return confirmed;
         },
         generateRoleReply,
         restoreRoleTemplate,

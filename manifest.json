@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "AutoNovel",
-  "version": "1.12.2",
+  "version": "1.12.3",
   "description": "自动续写小说及同楼层批量写卡，支持断点续传",
   "generate_interceptor": "NovelGen_isolateRoleResult",
   "hooks": {

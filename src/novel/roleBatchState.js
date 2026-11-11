@@ -24,25 +24,53 @@ export function duplicateRoleNames(text) {
     return [...duplicates];
 }
 
-/** Count pages whose role identity is not backed by the current batch's existing records. */
-export function countUnidentifiedRolePages(batch, message) {
-    if (!message) return 0;
-    const swipes = Array.isArray(message.swipes) && message.swipes.length ? message.swipes : [message.mes];
-    const bindings = new Map();
-    for (const item of [...(batch?.items || []), ...(batch?.history || [])]) {
-        if (!Number.isInteger(item.swipe)) continue;
-        if (!bindings.has(item.swipe)) bindings.set(item.swipe, []);
-        bindings.get(item.swipe).push(item);
+const PAGE_FINGERPRINT_OFFSET = 0x811c9dc5;
+
+/** Small non-cryptographic digest: the signature only needs to notice changed page contents. */
+function pageFingerprint(text) {
+    let hash = PAGE_FINGERPRINT_OFFSET;
+    for (let index = 0; index < text.length; index++) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
     }
-    return swipes.reduce((count, text, index) => {
-        if (typeof text !== 'string' || !text.trim() || text.trim() === '...') return count;
+    return hash.toString(16);
+}
+
+/**
+ * Pages whose role identity is not backed by the current batch's existing records.
+ * A receipt naming a current item is sufficient: failed retries leave extra attempt pages that
+ * no item points at, yet those pages already carry the retried role's identity.
+ */
+export function unidentifiedRolePages(batch, message) {
+    if (!message) return [];
+    const swipes = Array.isArray(message.swipes) && message.swipes.length ? message.swipes : [message.mes];
+    const candidates = [...(batch?.items || []), ...(batch?.history || [])];
+    const identities = new Set(candidates.map((item) => item.id));
+    const legacyPages = new Set(candidates.filter((item) => item.legacy).map((item) => item.swipe));
+    const pages = [];
+    swipes.forEach((text, index) => {
+        if (typeof text !== 'string' || !text.trim() || text.trim() === '...') return;
         const receipt = message.swipe_info?.[index]?.extra?.nag_role_batch;
-        if (receipt?.previewId) return count;
-        const known = (bindings.get(index) || []).some(
-            (item) => (receipt?.taskId === batch?.id && receipt.itemId === item.id) || (!receipt && item.legacy),
-        );
-        return count + (known ? 0 : 1);
-    }, 0);
+        if (receipt?.previewId) return;
+        const known = receipt
+            ? receipt.taskId === batch?.id && !!receipt.itemId && identities.has(receipt.itemId)
+            : legacyPages.has(index);
+        if (!known) pages.push({ index, text });
+    });
+    return pages;
+}
+
+export const countUnidentifiedRolePages = (batch, message) => unidentifiedRolePages(batch, message).length;
+
+/**
+ * Fingerprint of the unresolved pages' contents. Indices are excluded so deleting unrelated pages
+ * does not re-open the confirmation for pages the user already reviewed.
+ */
+export function unidentifiedRolePageSignature(batch, message) {
+    return unidentifiedRolePages(batch, message)
+        .map((page) => `${pageFingerprint(page.text)}:${page.text.length}`)
+        .sort()
+        .join(',');
 }
 export const nextRoleIndex = (batch) => {
     const index = batch.items.findIndex((item) => !roleComplete(item));

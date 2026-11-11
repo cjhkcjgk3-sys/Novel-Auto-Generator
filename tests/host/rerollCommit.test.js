@@ -100,6 +100,35 @@ it('asks before generating when an existing page has no reliable role binding', 
     expect(confirm).toHaveBeenCalledOnce();
 });
 
+it('does not ask again for abandoned retry pages that still name a current role', async () => {
+    const f = fixture();
+    const confirm = vi.fn(async () => true);
+    f.context.Popup = { show: { confirm } };
+    const message = f.context.chat[2];
+    message.swipes.push('甲的重试残页');
+    message.swipe_info.push({ extra: { nag_role_batch: { taskId: 'batch', itemId: 'role0', status: 'invalid' } } });
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+});
+
+it('does not ask twice for the same reviewed pages', async () => {
+    const f = fixture();
+    const confirm = vi.fn(async () => true);
+    f.context.Popup = { show: { confirm } };
+    const message = f.context.chat[2];
+    message.swipes.push('来历不明的角色卡');
+    message.swipe_info.push({});
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).toHaveBeenCalledOnce();
+    // A newly added unknown page is a new review subject, so the dialog returns.
+    message.swipes.push('第二张来历不明的角色卡');
+    message.swipe_info.push({});
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).toHaveBeenCalledTimes(2);
+});
+
 it('does not overwrite a user-edited prompt when restoring the task template', async () => {
     const f = fixture();
     f.context.chat[1].mes = '用户正在修改的提示词';

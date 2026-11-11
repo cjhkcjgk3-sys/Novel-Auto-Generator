@@ -173,6 +173,8 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 return;
             }
             if (host.confirmUnidentifiedRolePages && !(await host.confirmUnidentifiedRolePages(batch))) return;
+            // Persist the review fingerprint set by confirmUnidentifiedRolePages().
+            checkpoint();
             assertCurrent(run);
             if (host.snapshot().connected === false) throw new Error('酒馆 API 尚未连接，请连接后继续任务');
             ready = true;

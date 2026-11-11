@@ -1,6 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRoleBatchRunner, parseRoleNames } from '../../src/novel/roleBatch.js';
-import { countUnidentifiedRolePages, duplicateRoleNames } from '../../src/novel/roleBatchState.js';
+import {
+    countUnidentifiedRolePages,
+    duplicateRoleNames,
+    unidentifiedRolePageSignature,
+} from '../../src/novel/roleBatchState.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -28,6 +32,48 @@ it('reports old pages without a reliable role binding and ignores pending previe
     expect(countUnidentifiedRolePages(batch, message)).toBe(1);
     expect(countUnidentifiedRolePages(null, message)).toBe(2);
     expect(countUnidentifiedRolePages(null, { mes: '未建立备选页的旧回复' })).toBe(1);
+});
+
+it('does not report abandoned retry pages that still name a current role', () => {
+    const batch = {
+        id: 'b',
+        items: [{ id: 'a', name: '碧蓝航线·俾斯麦', swipe: 2, processed: true }],
+        history: [],
+    };
+    const message = {
+        swipes: ['第一次尝试（半截）', '...', '成品'],
+        swipe_info: [
+            { extra: { nag_role_batch: { taskId: 'b', itemId: 'a', status: 'invalid' } } },
+            {},
+            { extra: { nag_role_batch: { taskId: 'b', itemId: 'a', status: 'complete' } } },
+        ],
+    };
+    expect(countUnidentifiedRolePages(batch, message)).toBe(0);
+    // A receipt from another batch, or naming a removed role, still needs manual review.
+    message.swipe_info[0].extra.nag_role_batch.taskId = 'old-batch';
+    expect(countUnidentifiedRolePages(batch, message)).toBe(1);
+    message.swipe_info[0].extra.nag_role_batch.taskId = 'b';
+    message.swipe_info[0].extra.nag_role_batch.itemId = 'missing';
+    expect(countUnidentifiedRolePages(batch, message)).toBe(1);
+});
+
+it('fingerprints unresolved pages by content so reviewed pages are not asked twice', () => {
+    const batch = { id: 'b', items: [{ id: 'a', name: '甲', swipe: 0 }], history: [] };
+    const message = {
+        swipes: ['甲的正文', '未知一', '未知二'],
+        swipe_info: [{ extra: { nag_role_batch: { taskId: 'b', itemId: 'a' } } }, {}, {}],
+    };
+    const before = unidentifiedRolePageSignature(batch, message);
+    expect(before).toBeTruthy();
+    // Deleting an unrelated known page keeps the fingerprint stable.
+    message.swipes.splice(0, 1);
+    message.swipe_info.splice(0, 1);
+    expect(unidentifiedRolePageSignature(batch, message)).toBe(before);
+    // A different unresolved page changes the fingerprint.
+    message.swipes.push('未知三');
+    message.swipe_info.push({});
+    expect(unidentifiedRolePageSignature(batch, message)).not.toBe(before);
+    expect(unidentifiedRolePageSignature(batch, {})).toBe('');
 });
 
 it('recognizes 1000 recorded role pages without treating distinct names as duplicates', () => {
