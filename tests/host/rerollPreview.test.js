@@ -61,6 +61,57 @@ it('compares the selected candidate with the original without modifying any page
     });
 });
 
+it('saves a merge as a new candidate without changing original or other candidates', async () => {
+    const { f, r, message } = setup();
+    await r.runner.rerollSelected();
+    const comparison = await f.getHost().getRoleComparison(f.batch);
+    const before = structuredClone(message().swipes);
+    await f.getHost().saveMergedRolePreview(f.batch, comparison, CARD('合并后'));
+    expect(message().swipes.slice(0, before.length)).toEqual(before);
+    expect(message().swipes[4]).toBe(CARD('合并后'));
+    expect(f.getDisk()[2].swipes).toEqual(message().swipes);
+    expect(message().swipe_id).toBe(4);
+    expect(f.batch.preview).not.toBeNull();
+    await r.runner.acceptPreview();
+    expect(message().swipes).toEqual([ORIGINAL[0], CARD('合并后'), ORIGINAL[2]]);
+});
+
+it('refuses to save a merge after the candidate or chat has changed', async () => {
+    const { f, r, message } = setup();
+    await r.runner.rerollSelected();
+    const comparison = await f.getHost().getRoleComparison(f.batch);
+    message().swipes[3] = '用户更新的候选';
+    await expect(f.getHost().saveMergedRolePreview(f.batch, comparison, CARD('合并后'))).rejects.toThrow('已变化');
+    expect(message().swipes).toHaveLength(4);
+});
+
+it('never saves a merged candidate to a different chat if the user switches mid-check', async () => {
+    const { f, r } = setup();
+    await r.runner.rerollSelected();
+    const comparison = await f.getHost().getRoleComparison(f.batch);
+    const other = [
+        { mes: 'other' },
+        { is_user: true, mes: 'other' },
+        { mes: '其他聊天', swipes: ['其他聊天'], swipe_info: [{}], swipe_id: 0 },
+    ];
+    const work = f.getHost().saveMergedRolePreview(f.batch, comparison, CARD('合并后'));
+    f.context.chatId = 'other';
+    f.context.chat = other;
+    await expect(work).rejects.toThrow(/聊天|变化/);
+    expect(other[2].mes).toBe('其他聊天');
+});
+
+it('never overwrites another page changed while a merge is being checked', async () => {
+    const { f, r, message } = setup();
+    await r.runner.rerollSelected();
+    const comparison = await f.getHost().getRoleComparison(f.batch);
+    const work = f.getHost().saveMergedRolePreview(f.batch, comparison, CARD('合并后'));
+    message().swipe_info[0].extra.userEdit = '保留此修改';
+    await expect(work).rejects.toThrow('已变化');
+    expect(message().swipe_info[0].extra.userEdit).toBe('保留此修改');
+    expect(message().swipes).toHaveLength(4);
+});
+
 it('rejects a comparison if the original changes during the integrity check', async () => {
     const { f, r, message } = setup();
     await r.runner.rerollSelected();

@@ -1,9 +1,18 @@
 import * as tavern from '/script.js';
+import * as tavernLib from '/lib.js';
 import { extension_settings } from '/scripts/extensions.js';
 import { createSillyTavernHost } from './sillyTavern.js';
 export const host = createSillyTavernHost({
     extensionSettings: extension_settings,
     saveSettings: tavern.saveSettingsDebounced,
+    parseYaml:
+        typeof tavernLib.yaml?.parseDocument === 'function'
+            ? (text) => {
+                  const document = tavernLib.yaml.parseDocument(text, { uniqueKeys: true });
+                  if (document.errors.length) throw new Error('YAML 格式错误');
+                  return document.toJS();
+              }
+            : null,
     syncMesToSwipe: tavern.syncMesToSwipe,
     syncSwipeToMes: tavern.syncSwipeToMes,
     readSavedChat: async (context) => {

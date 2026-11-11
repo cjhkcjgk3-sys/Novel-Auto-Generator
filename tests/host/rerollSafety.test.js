@@ -103,3 +103,28 @@ it('keeps 999 other roles intact while comparing and accepting two candidates am
         expect(result.swipe_info[i]).toEqual(oldInfos[i]);
     }
 }, 30000);
+
+it('adds a merged candidate without changing 1000 existing role pages or their metadata', async () => {
+    const f = fixture({ isolate: false, selected: 1 });
+    const r = f.makeRunner({ rerollConfirm: true });
+    const message = f.context.chat[2];
+    f.batch.names = Array.from({ length: 1000 }, (_, i) => `角色${i}`);
+    f.batch.items = f.batch.names.map((name, i) => ({ id: `role${i}`, name, swipe: i, processed: true }));
+    r.settings.roleNames = f.batch.names.join('\n');
+    message.swipes = f.batch.names.map((name) => `完整原文：${name}。` + '设定。'.repeat(50));
+    message.swipe_info = f.batch.items.map((item) => ({
+        extra: { nag_role_batch: { taskId: f.batch.id, itemId: item.id, status: 'complete' }, marker: item.name },
+    }));
+    message.swipe_id = 500;
+    message.mes = message.swipes[500];
+    message.extra = structuredClone(message.swipe_info[500].extra);
+    await f.context.saveChat();
+    await r.runner.rerollSelected();
+    const comparison = await f.getHost().getRoleComparison(f.batch);
+    const oldSwipes = structuredClone(f.context.chat[2].swipes);
+    const oldInfos = structuredClone(f.context.chat[2].swipe_info);
+    await f.getHost().saveMergedRolePreview(f.batch, comparison, '合并的完整内容。' + '设定。'.repeat(50));
+    expect(f.context.chat[2].swipes).toHaveLength(1002);
+    expect(f.context.chat[2].swipes.slice(0, 1001)).toEqual(oldSwipes);
+    expect(f.context.chat[2].swipe_info.slice(0, 1001)).toEqual(oldInfos);
+}, 30000);

@@ -791,3 +791,25 @@
         width: 100%;
     }
 }
+.nag-merge-block {
+    border: 1px solid var(--SmartThemeBorderColor);
+    margin: 8px 0;
+    padding: 8px;
+    text-align: left;
+}
+.nag-merge-block label {
+    display: block;
+    margin: 6px 0;
+}
+.nag-merge-block pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 20vh;
+    overflow: auto;
+    margin: 4px 0;
+}
+.nag-merge-output {
+    width: 100%;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+}

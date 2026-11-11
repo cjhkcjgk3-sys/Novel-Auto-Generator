@@ -30,6 +30,7 @@ export function createSillyTavernHost({
     syncMesToSwipe = null,
     syncSwipeToMes = null,
     readSavedChat = null,
+    parseYaml = null,
 } = {}) {
     let roleGeneration = null;
     let roleIsolation = null;
@@ -622,7 +623,72 @@ export function createSillyTavernHost({
         const original = read(preview.index),
             candidate = read(candidateIndex);
         if (typeof original !== 'string' || typeof candidate !== 'string') throw new Error('原版或候选内容不存在');
-        return { name: preview.name, original, candidate, originalIndex: preview.index, candidateIndex };
+        return {
+            name: preview.name,
+            original,
+            candidate,
+            originalIndex: preview.index,
+            candidateIndex,
+            previewId: preview.id,
+        };
+    }
+
+    /** Append a user-merged version as another candidate; the old pages remain untouched. */
+    async function saveMergedRolePreview(batch, comparison, text, validationOptions = {}) {
+        const context = getContext();
+        const { preview, message, candidates } = rolePreview(batch);
+        if (!preview || preview.id !== comparison?.previewId) throw new Error('待确认的角色已变化，请重新打开对比');
+        assertPreviewFloor(batch, preview, message);
+        if (!candidates.includes(comparison.candidateIndex) || preview.index !== comparison.originalIndex)
+            throw new Error('原版或候选页已变化，请重新打开对比');
+        if (
+            message.swipes[preview.index] !== comparison.original ||
+            message.swipes[comparison.candidateIndex] !== comparison.candidate
+        )
+            throw new Error('原版或候选内容已变化，请重新打开对比');
+        if (message.swipe_id < message.swipes.length && message.mes !== message.swipes[message.swipe_id])
+            throw new Error('当前页面有未同步的编辑，请先保存并重新打开对比');
+        if (typeof text !== 'string' || !text.trim()) throw new Error('合并内容为空');
+        const candidateInfo = message.swipe_info?.[comparison.candidateIndex];
+        const receipt = candidateInfo?.extra?.nag_role_batch;
+        if (!['complete', 'invalid'].includes(receipt?.status)) throw new Error('候选版本未正常结束，不能合并');
+        const snapshotPages = JSON.stringify({
+            swipes: message.swipes,
+            swipe_info: message.swipe_info,
+            selected: message.swipe_id,
+            mes: message.mes,
+        });
+        const assertStable = () => {
+            assertPreviewFloor(batch, preview, message);
+            if (
+                getChat()?.[preview.floor] !== message ||
+                JSON.stringify({
+                    swipes: message.swipes,
+                    swipe_info: message.swipe_info,
+                    selected: message.swipe_id,
+                    mes: message.mes,
+                }) !== snapshotPages
+            )
+                throw new Error('聊天或备选回复已变化，请重新打开对比');
+        };
+        await assertOriginalPages(preview, message);
+        assertStable();
+        const info = structuredClone(candidateInfo);
+        info.extra ??= {};
+        info.extra.nag_role_batch = {
+            ...receipt,
+            attemptId: newIdentity('merge'),
+            status: isRoleCardTruncated(text, validationOptions) ? 'invalid' : 'complete',
+        };
+        info.extra[RESULT_HASH_KEY] = await hashRoleResult(text);
+        assertStable();
+        const next = structuredClone(message),
+            index = next.swipes.length;
+        next.swipe_info ??= [];
+        next.swipes.push(text);
+        next.swipe_info[index] = info;
+        selectPage(next, index);
+        return persistReplacement(context, preview.floor, preview.identity, message, next, index);
     }
 
     /** Checks before generating another candidate; returns the template the prompt must still hold. */
@@ -996,6 +1062,7 @@ export function createSillyTavernHost({
     return {
         getContext,
         getChat,
+        parseYaml,
         captureRoleReroll,
         readRoleTemplate,
         restoreRoleTemplateIfEquals,
@@ -1003,6 +1070,7 @@ export function createSillyTavernHost({
         restoreRoleRerollView,
         rolePreview,
         getRoleComparison,
+        saveMergedRolePreview,
         beginRolePreview,
         prepareRolePreviewReroll,
         acceptRolePreview,

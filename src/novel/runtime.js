@@ -1,5 +1,5 @@
 import { createRoleSelectionUI } from '../host/roleSelection.js';
-import { renderRoleComparison } from './roleComparison.js';
+import { buildRoleMergePlan, mergeRolePlan, renderRoleComparison, validateRoleMerge } from './roleComparison.js';
 import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
 import { countUnidentifiedRolePages, duplicateRoleNames, roleComplete, updateRoleNames } from './roleBatchState.js';
@@ -79,7 +79,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.11.2';
+    const pluginVersion = '1.12.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1620,7 +1620,86 @@ export function initNovelUI(host) {
                         const comparison = await host.getRoleComparison(batch);
                         const show = host.getContext()?.Popup?.show?.text;
                         if (typeof show !== 'function') throw new Error('当前酒馆无法打开对比窗口');
-                        await show('角色版本对比', renderRoleComparison(comparison), { wide: true });
+                        const plan = buildRoleMergePlan(comparison.original, comparison.candidate);
+                        await show('角色版本对比', renderRoleComparison(comparison), {
+                            wide: true,
+                            onOpen(popup) {
+                                if (!plan) return;
+                                const area = popup.content.querySelector('.nag-merge-panel');
+                                if (!area) return;
+                                const output = area.querySelector('.nag-merge-output');
+                                const status = area.querySelector('.nag-merge-status');
+                                const save = area.querySelector('.nag-merge-save');
+                                const preview = area.querySelector('.nag-merge-preview');
+                                let draft = null,
+                                    saving = false;
+                                area.addEventListener('change', () => {
+                                    draft = null;
+                                    save.disabled = true;
+                                    status.textContent = '选择已变化，请重新预览。';
+                                });
+                                preview.addEventListener('click', () => {
+                                    const count = plan.filter((group) => group.type === 'choice').length;
+                                    const selected = Array.from(
+                                        { length: count },
+                                        (_, i) => area.querySelector(`input[name="nag-merge-${i}"]:checked`)?.value,
+                                    );
+                                    try {
+                                        const text = mergeRolePlan(plan, selected);
+                                        const result = validateRoleMerge(
+                                            comparison.original,
+                                            comparison.candidate,
+                                            text,
+                                            host.parseYaml,
+                                        );
+                                        output.value = text;
+                                        draft = result.ok ? text : null;
+                                        save.disabled = !result.ok;
+                                        status.textContent = result.message;
+                                    } catch (error) {
+                                        draft = null;
+                                        save.disabled = true;
+                                        status.textContent = error.message;
+                                    }
+                                });
+                                save.addEventListener('click', async () => {
+                                    if (saving || draft == null) return;
+                                    saving = true;
+                                    save.disabled = true;
+                                    preview.disabled = true;
+                                    const inputs = area.querySelectorAll('input');
+                                    inputs.forEach((input) => {
+                                        input.disabled = true;
+                                    });
+                                    let saved = false;
+                                    try {
+                                        const result = await host.saveMergedRolePreview(batch, comparison, draft, {
+                                            minLength: settings.minChapterLength,
+                                            expectedClosingTags: settings.expectedClosingTags,
+                                        });
+                                        saved = true;
+                                        await popup.completeAffirmative();
+                                        if (result.refreshFailed)
+                                            toastr.warning('合并候选已保存，但页面刷新失败，请重新打开聊天查看');
+                                        else toastr.success('合并内容已保存为新的候选页，请核对后决定是否替换原版');
+                                    } catch (error) {
+                                        recordError(error, { phase: 'merge-preview' });
+                                        status.textContent = saved
+                                            ? '合并候选已保存，但窗口关闭失败，请关闭窗口并核对聊天。'
+                                            : error.uncertain
+                                              ? `保存结果未确认，请关闭窗口并核对聊天：${error.message}`
+                                              : error.message;
+                                        save.disabled = saved || !!error.uncertain;
+                                        preview.disabled = saved || !!error.uncertain;
+                                    } finally {
+                                        inputs.forEach((input) => {
+                                            input.disabled = saved;
+                                        });
+                                        saving = false;
+                                    }
+                                });
+                            },
+                        });
                     }, 'preview-compare'),
                 accept: () => runRoleAction(() => roleRunner.acceptPreview(), 'preview-accept'),
                 again: () =>
