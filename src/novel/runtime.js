@@ -91,7 +91,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.12.4';
+    const pluginVersion = '1.12.5';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -931,6 +931,9 @@ export function initNovelUI(host) {
         $('#nag-role-correction-toggle')
             .toggle(batchMode && !!batch)
             .prop('disabled', busy);
+        $('#nag-btn-restore-prompt')
+            .toggle(batchMode && !!batch)
+            .prop('disabled', busy);
         $('#nag-panel-archive').toggle(batchMode);
         $('#nag-role-correction-toggle').text(roleCorrection ? '完成纠错' : '手动纠错');
         $('#nag-role-correction-hint').toggle(batchMode && roleCorrection && !!batch);
@@ -1089,7 +1092,10 @@ export function initNovelUI(host) {
                             <label class="nag-checkbox-label" title="当前页及前后各一页正常预览，旧角色卡不进入下一次请求；预设、命令和上方消息照常使用"><input type="checkbox" id="nag-set-isolate-result"><span>隔离写卡结果（三页预览豁免）</span></label><small id="nag-result-preview-window" class="nag-hint" hidden></small>
                             <label class="nag-checkbox-label" title="开启：重生成此角色时新内容先作为候选版本放在末尾，确认“用这版替换”后才替换原页，可“再生成一版”比较或“放弃”。关闭：生成完成并校验通过后自动替换"><input type="checkbox" id="nag-set-reroll-confirm"><span>重生成后手动确认</span></label>
                         </div>
-                        <button type="button" id="nag-role-correction-toggle" class="menu_button" style="display:none">手动纠错</button>
+                        <div class="nag-btn-row">
+                            <button type="button" id="nag-role-correction-toggle" class="menu_button" style="display:none">手动纠错</button>
+                            <button type="button" id="nag-btn-restore-prompt" class="menu_button" style="display:none">恢复原始提示词</button>
+                        </div>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
                     </div>
@@ -1392,6 +1398,31 @@ export function initNovelUI(host) {
             settings.errorLog = [];
             saveSettings();
             toastr.info('错误日志已清空');
+        });
+        $('#nag-btn-restore-prompt').on('click', async () => {
+            if (settings.isRunning || fileOperation) return;
+            const batch = settings.roleBatch;
+            if (!batch || batch.identity !== host.snapshot().identity)
+                return toastr.warning('请回到原批次聊天后再恢复提示词');
+            if (!String(batch.template || '').includes('[[角色名]]'))
+                return toastr.warning('批次记录里没有可用的提示词模板，请手动编辑聊天中的提示词并保留 [[角色名]]');
+            const popup = host.getContext()?.Popup?.show;
+            if (
+                typeof popup?.confirm === 'function' &&
+                !(await popup.confirm(
+                    '恢复原始提示词',
+                    '将把聊天中该用户楼层改回批次保存的原始模板（含 [[角色名]]），当前编辑内容会被覆盖。确定恢复？',
+                ))
+            )
+                return;
+            try {
+                await host.restoreRoleTemplate(batch, { force: true });
+                toastr.success('已恢复原始提示词模板，可以继续生成或重生成该角色');
+            } catch (error) {
+                recordError(error, { phase: 'restore-template' });
+                toastr.warning(error.message);
+            }
+            updateUI();
         });
         $('#nag-btn-archive-add').on('click', () => {
             const names = parseRoleNames(String($('#nag-archive-input').val() || ''));

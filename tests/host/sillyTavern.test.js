@@ -203,6 +203,21 @@ it('restores the placeholder on explicit reset without deleting generated pages'
     expect(context.chat[1].mes).toBe('另一聊天');
 });
 
+it('force-restores the saved template over an edited prompt only when asked', async () => {
+    const { host, context } = batchSetup();
+    const batch = {
+        ...host.prepareRoleBatch(),
+        identity: host.snapshot().identity,
+        items: [{ id: 'a', name: '甲' }],
+        history: [],
+    };
+    context.chat[1].mes = '用户改过但没有占位符';
+    await host.restoreRoleTemplate(batch);
+    expect(context.chat[1].mes).toBe('用户改过但没有占位符');
+    await host.restoreRoleTemplate(batch, { force: true });
+    expect(context.chat[1].mes).toBe('生成 [[角色名]]');
+});
+
 it('does not accept a swallowed stream error or retain its temporary swipe', async () => {
     const { host, context } = batchSetup();
     const original = structuredClone(context.chat[2]);

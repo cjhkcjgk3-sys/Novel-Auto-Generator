@@ -94,15 +94,17 @@ export function createSillyTavernHost({
         return { promptFloor, resultFloor: tail.length ? promptFloor + 1 : null, template: chat[promptFloor].mes };
     }
 
-    async function restoreRoleTemplate(batch) {
+    async function restoreRoleTemplate(batch, { force = false } = {}) {
         if (!batch || snapshot().identity !== batch.identity) return;
         if (roleGeneration) throw new Error('上一轮酒馆生成仍在退出，请稍后重置');
         if (snapshot().generating === true) throw new Error('请等待酒馆生成停止后再重置');
         const context = getContext(),
             prompt = getChat()?.[batch.promptFloor];
         if (!prompt?.is_user) return;
-        if (prompt.mes.includes('[[角色名]]') && prompt.mes !== batch.template) return;
+        // force is user-confirmed: the chat prompt was edited or lost the placeholder on purpose.
+        if (!force && prompt.mes.includes('[[角色名]]') && prompt.mes !== batch.template) return;
         if (
+            !force &&
             Array.isArray(batch.items) &&
             prompt.mes !== batch.template &&
             ![...batch.items, ...(batch.history || [])].some(

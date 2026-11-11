@@ -122,7 +122,9 @@ export function createRoleBatchRunner({
             }
         }
         if (!current.includes(ROLE_PLACEHOLDER))
-            throw new Error(`提示词需要包含 ${ROLE_PLACEHOLDER}，请修改并保存聊天中的提示词`);
+            throw new Error(
+                `聊天中的提示词缺少 ${ROLE_PLACEHOLDER}：请在该用户楼层补上占位符并保存，或点击“恢复原始提示词”`,
+            );
         if (current === batch.template) return;
         const previous = batch.template;
         batch.template = current;
