@@ -79,7 +79,8 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.12.0';
+    let roleSuccessNotices = [];
+    const pluginVersion = '1.12.1';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -591,7 +592,11 @@ export function initNovelUI(host) {
             saveSettings();
             updateUI();
         },
-        notify: (type, message, options) => toastr[type](message, undefined, options),
+        notify: (type, message, options) => {
+            const notice = toastr[type](message, undefined, options);
+            if (type === 'success' && notice) roleSuccessNotices = [...roleSuccessNotices, notice].slice(-5);
+            return notice;
+        },
         onStats: (stats) => {
             generationStats = stats;
         },
@@ -1616,6 +1621,8 @@ export function initNovelUI(host) {
             onPreview: {
                 compare: () =>
                     runRoleAction(async () => {
+                        for (const notice of roleSuccessNotices) toastr.clear(notice);
+                        roleSuccessNotices = [];
                         const batch = settings.roleBatch;
                         const comparison = await host.getRoleComparison(batch);
                         const show = host.getContext()?.Popup?.show?.text;
@@ -1623,7 +1630,9 @@ export function initNovelUI(host) {
                         const plan = buildRoleMergePlan(comparison.original, comparison.candidate);
                         await show('角色版本对比', renderRoleComparison(comparison), {
                             wide: true,
+                            allowVerticalScrolling: true,
                             onOpen(popup) {
+                                popup.dlg.classList.add('nag-compare-dialog');
                                 if (!plan) return;
                                 const area = popup.content.querySelector('.nag-merge-panel');
                                 if (!area) return;
@@ -1631,6 +1640,8 @@ export function initNovelUI(host) {
                                 const status = area.querySelector('.nag-merge-status');
                                 const save = area.querySelector('.nag-merge-save');
                                 const preview = area.querySelector('.nag-merge-preview');
+                                const back = area.querySelector('.nag-merge-back');
+                                const blocks = area.querySelector('.nag-merge-blocks');
                                 let draft = null,
                                     saving = false;
                                 area.addEventListener('change', () => {
@@ -1652,15 +1663,30 @@ export function initNovelUI(host) {
                                             text,
                                             host.parseYaml,
                                         );
-                                        output.value = text;
+                                        output.textContent = text;
                                         draft = result.ok ? text : null;
                                         save.disabled = !result.ok;
                                         status.textContent = result.message;
+                                        output.hidden = false;
+                                        blocks.hidden = true;
+                                        preview.hidden = true;
+                                        back.hidden = false;
+                                        popup.content.scrollTop = 0;
                                     } catch (error) {
                                         draft = null;
                                         save.disabled = true;
                                         status.textContent = error.message;
                                     }
+                                });
+                                back.addEventListener('click', () => {
+                                    output.hidden = true;
+                                    blocks.hidden = false;
+                                    preview.hidden = false;
+                                    back.hidden = true;
+                                    draft = null;
+                                    save.disabled = true;
+                                    status.textContent = '选择完成后请重新预览。';
+                                    popup.content.scrollTop = 0;
                                 });
                                 save.addEventListener('click', async () => {
                                     if (saving || draft == null) return;

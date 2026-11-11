@@ -20,6 +20,11 @@ it('shows changes and escapes all character content', () => {
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('<img>');
     expect(html).toContain('nag-merge-block');
+    expect(html).toContain('<div class="nag-merge-panel">');
+    expect(html).not.toContain('<details class="nag-merge-panel">');
+    expect(html).toContain('选原版');
+    expect(html).toContain('选新版');
+    expect(html).toContain('nag-merge-back');
     expect(html).toContain('原版第 5 页');
     expect(html).toContain('候选第 10 页');
 });

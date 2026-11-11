@@ -1,4 +1,4 @@
-import { diffLines, diffStats, renderDiffHtml } from '../../txtToWorldbook/core/diff.js';
+import { diffLines, diffStats } from '../../txtToWorldbook/core/diff.js';
 
 const MAX_CELLS = 200000;
 const MAX_TEXT = 200000;
@@ -132,13 +132,18 @@ export function renderMergeControls(plan) {
     if (!plan) return '<p>内容太长，无法安全计算段落合并。可在酒馆中手动编辑候选。</p>';
     const choices = plan.filter((group) => group.type === 'choice');
     if (!choices.length) return '<p>原版与候选内容相同，无需合并。</p>';
-    const sections = choices
-        .map((group, index) => {
+    let index = 0;
+    const sections = plan
+        .map((group, position) => {
+            if (group.type !== 'choice') return '';
+            const before = plan[position - 1]?.type === 'equal' ? plan[position - 1].lines.at(-1) : '';
+            const after = plan[position + 1]?.type === 'equal' ? plan[position + 1].lines[0] : '';
             const text = (lines) => (lines.length ? escapeHtml(lines.join('\n')) : '（此版本无内容）');
-            return `<fieldset class="nag-merge-block"><legend>差异段落 ${index + 1}</legend><label><input type="radio" name="nag-merge-${index}" value="original"> 原版<pre>${text(group.original)}</pre></label><label><input type="radio" name="nag-merge-${index}" value="candidate" checked> 新版<pre>${text(group.candidate)}</pre></label></fieldset>`;
+            const number = index++;
+            return `<fieldset class="nag-merge-block"><legend>差异 ${number + 1}</legend>${before ? `<div class="nag-merge-context">${escapeHtml(before)}</div>` : ''}<label class="nag-merge-original"><input type="radio" name="nag-merge-${number}" value="original"> 选原版<pre>${text(group.original)}</pre></label><label class="nag-merge-candidate"><input type="radio" name="nag-merge-${number}" value="candidate" checked> 选新版<pre>${text(group.candidate)}</pre></label>${after ? `<div class="nag-merge-context">${escapeHtml(after)}</div>` : ''}</fieldset>`;
         })
         .join('');
-    return `<details class="nag-merge-panel"><summary>选择段落并合并</summary><p>每段选择一种版本；结构或格式有差异时请检查预览。合并后先保存为新的候选页。</p>${sections}<button type="button" class="menu_button nag-merge-preview">预览合并结果</button><p class="nag-merge-status" aria-live="polite"></p><textarea class="nag-merge-output" readonly rows="12" aria-label="合并结果预览"></textarea><button type="button" class="menu_button nag-merge-save" disabled>保存为合并候选</button></details>`;
+    return `<div class="nag-merge-panel"><div class="nag-merge-toolbar"><div class="nag-merge-actions"><button type="button" class="menu_button nag-merge-preview">预览合并结果</button><button type="button" class="menu_button nag-merge-back" hidden>返回选择</button><button type="button" class="menu_button nag-merge-save" disabled>保存为合并候选</button></div><p class="nag-merge-status" aria-live="polite">直接在下方选择每段原版或新版，默认选择新版。</p></div><div class="nag-merge-blocks">${sections}</div><pre class="nag-merge-output" hidden aria-label="合并结果预览"></pre></div>`;
 }
 
 /** Build a bounded comparison; never render character content as executable HTML. */
@@ -152,7 +157,7 @@ export function renderRoleComparison({ name, original, candidate, originalIndex,
     if (bounded) {
         const hunks = diffLines(original, candidate);
         const stats = diffStats(hunks);
-        diff = `<p>按行比较：新增 ${stats.added} 行，删除 ${stats.removed} 行。红色为原版，绿色为候选版。</p>${renderDiffHtml(hunks)}`;
+        diff = `<p>按行比较：新增 ${stats.added} 行，删除 ${stats.removed} 行。直接在下方选择原版或新版。</p>`;
     } else {
         diff = '<p>内容较长，已跳过自动差异计算。请展开下方原文查看；每版最多显示前 20 万字符。</p>';
     }

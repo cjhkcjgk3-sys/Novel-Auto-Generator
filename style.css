@@ -800,16 +800,73 @@
 .nag-merge-block label {
     display: block;
     margin: 6px 0;
+    padding: 8px;
+    border-radius: 5px;
 }
 .nag-merge-block pre {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    max-height: 20vh;
-    overflow: auto;
     margin: 4px 0;
 }
 .nag-merge-output {
     width: 100%;
     box-sizing: border-box;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-align: left;
+}
+.nag-merge-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px;
+    background: var(--SmartThemeBlurTintColor, #222);
+}
+.nag-merge-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    width: 100%;
+    align-items: center;
+}
+.nag-merge-actions .menu_button {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    max-width: 100%;
+    white-space: nowrap;
+}
+.nag-role-comparison [hidden] {
+    display: none !important;
+}
+.nag-merge-status {
+    margin: 4px 0;
+    font-size: 0.85em;
+}
+.nag-merge-original {
+    background: rgba(180, 50, 50, 0.18);
+}
+.nag-merge-candidate {
+    background: rgba(40, 150, 90, 0.18);
+}
+.nag-merge-context {
+    opacity: 0.7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+    .popup.nag-compare-dialog {
+        width: 100dvw;
+        max-width: 100dvw;
+        height: 100dvh;
+        max-height: 100dvh;
+        margin: 0;
+        padding: 4px;
+        border-radius: 0;
+    }
+    .popup.nag-compare-dialog .popup-content {
+        padding: 0 4px;
+    }
 }
