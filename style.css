@@ -741,6 +741,11 @@
     margin: 0 2px;
     padding: 3px 6px;
 }
+
+#chat .mes_buttons:has(.nag-preview-action) {
+    flex-wrap: wrap;
+    overflow-x: visible;
+}
 .nag-role-status-row {
     display: flex;
     flex-wrap: wrap;
@@ -758,4 +763,31 @@
 .nag-role-correction-actions button {
     margin: 0;
     padding: 3px 6px;
+}
+.nag-role-comparison p {
+    text-align: left;
+}
+.nag-comparison-versions {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+.nag-comparison-versions details {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+}
+.nag-comparison-versions pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 45vh;
+    overflow: auto;
+}
+@media (max-width: 600px) {
+    .nag-comparison-versions {
+        flex-direction: column;
+    }
+    .nag-comparison-versions details {
+        width: 100%;
+    }
 }

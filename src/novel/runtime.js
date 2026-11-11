@@ -1,4 +1,5 @@
 import { createRoleSelectionUI } from '../host/roleSelection.js';
+import { renderRoleComparison } from './roleComparison.js';
 import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
 import { countUnidentifiedRolePages, duplicateRoleNames, roleComplete, updateRoleNames } from './roleBatchState.js';
@@ -78,7 +79,7 @@ export function initNovelUI(host) {
     let roleSelection = null;
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
-    const pluginVersion = '1.11.1';
+    const pluginVersion = '1.11.2';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1613,6 +1614,14 @@ export function initNovelUI(host) {
             isBusy: () => settings.isRunning || fileOperation,
             onReroll: rerollCurrentRole,
             onPreview: {
+                compare: () =>
+                    runRoleAction(async () => {
+                        const batch = settings.roleBatch;
+                        const comparison = await host.getRoleComparison(batch);
+                        const show = host.getContext()?.Popup?.show?.text;
+                        if (typeof show !== 'function') throw new Error('当前酒馆无法打开对比窗口');
+                        await show('角色版本对比', renderRoleComparison(comparison), { wide: true });
+                    }, 'preview-compare'),
                 accept: () => runRoleAction(() => roleRunner.acceptPreview(), 'preview-accept'),
                 again: () =>
                     runRoleAction(async () => {

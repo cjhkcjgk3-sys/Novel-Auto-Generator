@@ -17,6 +17,7 @@ export function selectedRole(batch, message) {
 
 /** Add one control to the native message and render the prompt as a view-only substitution. */
 const PREVIEW_BUTTONS = [
+    ['compare', '⇄ 对比原版'],
     ['accept', '✓ 用这版替换'],
     ['again', '↻ 再生成一版'],
     ['discard', '✗ 放弃'],
@@ -132,15 +133,18 @@ export function createRoleSelectionUI({ host, getBatch, isBusy, onReroll, onPrev
                 container.appendChild(button);
             }
             button.textContent = label;
-            button.disabled = isBusy() || (action === 'accept' && !onCandidate);
+            button.disabled =
+                isBusy() || (action === 'accept' && !onCandidate) || (action === 'compare' && !candidates.length);
             button.title =
-                action === 'accept'
-                    ? onCandidate
-                        ? `用当前显示的候选版本替换「${preview.name}」原来的第 ${preview.index + 1} 页，并删除其他候选`
-                        : `请先切换到候选页（第 ${candidates.map((index) => index + 1).join('、') || '无'} 页）`
-                    : action === 'again'
-                      ? `为「${preview.name}」在末尾再生成一个候选版本`
-                      : `删除全部候选版本，回到「${preview.name}」原来的第 ${preview.index + 1} 页`;
+                action === 'compare'
+                    ? '比较原角色和当前候选；若正在看原版，则比较最新候选'
+                    : action === 'accept'
+                      ? onCandidate
+                          ? `用当前显示的候选版本替换「${preview.name}」原来的第 ${preview.index + 1} 页，并删除其他候选`
+                          : `请先切换到候选页（第 ${candidates.map((index) => index + 1).join('、') || '无'} 页）`
+                      : action === 'again'
+                        ? `为「${preview.name}」在末尾再生成一个候选版本`
+                        : `删除全部候选版本，回到「${preview.name}」原来的第 ${preview.index + 1} 页`;
         }
     }
     for (const name of [

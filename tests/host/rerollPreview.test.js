@@ -40,6 +40,36 @@ it('appends another candidate on every “再生成一版” and keeps all of th
     expect(f.batch.preview).not.toBeNull();
 });
 
+it('compares the selected candidate with the original without modifying any page', async () => {
+    const { f, r, message } = setup();
+    await r.runner.rerollSelected();
+    await r.runner.rerollPreviewAgain();
+    await f.getHost().showRolePage(2, 3, f.batch.identity);
+    const before = structuredClone(message());
+    expect(await f.getHost().getRoleComparison(f.batch)).toMatchObject({
+        original: ORIGINAL[1],
+        candidate: versions(1),
+        originalIndex: 1,
+        candidateIndex: 3,
+    });
+    expect(message()).toEqual(before);
+    await f.getHost().showRolePage(2, 1, f.batch.identity);
+    expect(await f.getHost().getRoleComparison(f.batch)).toMatchObject({
+        original: ORIGINAL[1],
+        candidate: versions(2),
+        candidateIndex: 4,
+    });
+});
+
+it('rejects a comparison if the original changes during the integrity check', async () => {
+    const { f, r, message } = setup();
+    await r.runner.rerollSelected();
+    const work = f.getHost().getRoleComparison(f.batch);
+    message().swipes[1] = '用户编辑了原版';
+    await expect(work).rejects.toThrow(/变化|修改/);
+    expect(message().swipes[1]).toBe('用户编辑了原版');
+});
+
 it('accepts the displayed candidate into the original position and removes the other candidates', async () => {
     const { f, r, message } = setup();
     await r.runner.rerollSelected();

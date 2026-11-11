@@ -593,6 +593,38 @@ export function createSillyTavernHost({
             });
     }
 
+    async function getRoleComparison(batch) {
+        const { preview, message, candidates, displayed, onCandidate } = rolePreview(batch);
+        if (!preview) throw new Error('没有待确认的候选版本');
+        assertPreviewFloor(batch, preview, message);
+        if (!candidates.length) throw new Error('没有可比较的候选版本');
+        const candidateIndex = onCandidate ? displayed : candidates.at(-1);
+        const originalBefore = message.swipes[preview.index],
+            candidateBefore = message.swipes[candidateIndex];
+        const metadataBefore = JSON.stringify([
+            message.swipe_info?.[preview.index],
+            message.swipe_info?.[candidateIndex],
+        ]);
+        const displayedBefore = message.mes;
+        await assertOriginalPages(preview, message);
+        assertPreviewFloor(batch, preview, message);
+        if (
+            getChat()?.[preview.floor] !== message ||
+            message.swipe_id !== displayed ||
+            message.swipes[preview.index] !== originalBefore ||
+            message.swipes[candidateIndex] !== candidateBefore ||
+            message.mes !== displayedBefore ||
+            JSON.stringify([message.swipe_info?.[preview.index], message.swipe_info?.[candidateIndex]]) !==
+                metadataBefore
+        )
+            throw new Error('聊天或备选页已变化，请重新打开对比');
+        const read = (index) => (index === displayed ? message.mes : message.swipes[index]);
+        const original = read(preview.index),
+            candidate = read(candidateIndex);
+        if (typeof original !== 'string' || typeof candidate !== 'string') throw new Error('原版或候选内容不存在');
+        return { name: preview.name, original, candidate, originalIndex: preview.index, candidateIndex };
+    }
+
     /** Checks before generating another candidate; returns the template the prompt must still hold. */
     async function prepareRolePreviewReroll(batch) {
         const { preview, message } = rolePreview(batch);
@@ -970,6 +1002,7 @@ export function createSillyTavernHost({
         commitRoleReroll,
         restoreRoleRerollView,
         rolePreview,
+        getRoleComparison,
         beginRolePreview,
         prepareRolePreviewReroll,
         acceptRolePreview,
