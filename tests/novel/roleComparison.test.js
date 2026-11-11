@@ -24,9 +24,29 @@ it('shows changes and escapes all character content', () => {
     expect(html).not.toContain('<details class="nag-merge-panel">');
     expect(html).toContain('选原版');
     expect(html).toContain('选新版');
+    expect(html).toContain('type="checkbox"');
+    expect(html).not.toContain('type="radio"');
     expect(html).toContain('nag-merge-back');
     expect(html).toContain('原版第 5 页');
     expect(html).toContain('候选第 10 页');
+});
+
+it('can keep both versions or omit either difference without changing shared lines', () => {
+    const plan = buildRoleMergePlan('head\n旧段\nshared\n旧二\nend', 'head\n新段\nshared\n新二\nend');
+    expect(mergeRolePlan(plan, [['original', 'candidate'], []])).toBe('head\n旧段\n新段\nshared\nend');
+    expect(mergeRolePlan(plan, [['candidate', 'original'], ['candidate']])).toBe('head\n旧段\n新段\nshared\n新二\nend');
+    expect(() => mergeRolePlan(plan, [['original'], ['unexpected']])).toThrow('请选择');
+});
+
+it('rejects duplicate structured fields when selecting both versions produces invalid YAML', () => {
+    const oldText = '<character_design_complex>\nname: 甲\n</character_design_complex>';
+    const newText = '<character_design_complex>\nname: 乙\n</character_design_complex>';
+    const combined = mergeRolePlan(buildRoleMergePlan(oldText, newText), [['original', 'candidate']]);
+    const parseYaml = (text) => {
+        if ((text.match(/^name:/gm) || []).length > 1) throw new Error('duplicate key');
+        return { name: text };
+    };
+    expect(validateRoleMerge(oldText, newText, combined, parseYaml).ok).toBe(false);
 });
 
 it('merges selected contiguous changes while preserving either full version exactly', () => {

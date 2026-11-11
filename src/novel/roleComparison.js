@@ -43,8 +43,11 @@ export function mergeRolePlan(plan, selections) {
         if (group.type === 'equal') lines.push(...group.lines);
         else {
             const selection = selections[index++];
-            if (selection !== 'original' && selection !== 'candidate') throw new Error('请选择每个差异段落的版本');
-            lines.push(...group[selection]);
+            const selected = typeof selection === 'string' ? [selection] : selection;
+            if (!Array.isArray(selected) || selected.some((value) => value !== 'original' && value !== 'candidate'))
+                throw new Error('请选择每个差异段落的版本');
+            if (selected.includes('original')) lines.push(...group.original);
+            if (selected.includes('candidate')) lines.push(...group.candidate);
         }
     }
     return lines.join('\n');
@@ -140,10 +143,10 @@ export function renderMergeControls(plan) {
             const after = plan[position + 1]?.type === 'equal' ? plan[position + 1].lines[0] : '';
             const text = (lines) => (lines.length ? escapeHtml(lines.join('\n')) : '（此版本无内容）');
             const number = index++;
-            return `<fieldset class="nag-merge-block"><legend>差异 ${number + 1}</legend>${before ? `<div class="nag-merge-context">${escapeHtml(before)}</div>` : ''}<label class="nag-merge-original"><input type="radio" name="nag-merge-${number}" value="original"> 选原版<pre>${text(group.original)}</pre></label><label class="nag-merge-candidate"><input type="radio" name="nag-merge-${number}" value="candidate" checked> 选新版<pre>${text(group.candidate)}</pre></label>${after ? `<div class="nag-merge-context">${escapeHtml(after)}</div>` : ''}</fieldset>`;
+            return `<fieldset class="nag-merge-block"><legend>差异 ${number + 1}</legend>${before ? `<div class="nag-merge-context">${escapeHtml(before)}</div>` : ''}<label class="nag-merge-original"><input type="checkbox" name="nag-merge-${number}" value="original"> 选原版<pre>${text(group.original)}</pre></label><label class="nag-merge-candidate"><input type="checkbox" name="nag-merge-${number}" value="candidate" checked> 选新版<pre>${text(group.candidate)}</pre></label>${after ? `<div class="nag-merge-context">${escapeHtml(after)}</div>` : ''}</fieldset>`;
         })
         .join('');
-    return `<div class="nag-merge-panel"><div class="nag-merge-toolbar"><div class="nag-merge-actions"><button type="button" class="menu_button nag-merge-preview">预览合并结果</button><button type="button" class="menu_button nag-merge-back" hidden>返回选择</button><button type="button" class="menu_button nag-merge-save" disabled>保存为合并候选</button></div><p class="nag-merge-status" aria-live="polite">直接在下方选择每段原版或新版，默认选择新版。</p></div><div class="nag-merge-blocks">${sections}</div><pre class="nag-merge-output" hidden aria-label="合并结果预览"></pre></div>`;
+    return `<div class="nag-merge-panel"><div class="nag-merge-toolbar"><div class="nag-merge-actions"><button type="button" class="menu_button nag-merge-preview">预览合并结果</button><button type="button" class="menu_button nag-merge-back" hidden>返回选择</button><button type="button" class="menu_button nag-merge-save" disabled>保存为合并候选</button></div><p class="nag-merge-status" aria-live="polite">每段可勾选原版、新版或两者；都不勾选则删除该段。两者都选时原版在前。默认选新版，请检查预览中的重复字段。</p></div><div class="nag-merge-blocks">${sections}</div><pre class="nag-merge-output" hidden aria-label="合并结果预览"></pre></div>`;
 }
 
 /** Build a bounded comparison; never render character content as executable HTML. */
@@ -157,7 +160,7 @@ export function renderRoleComparison({ name, original, candidate, originalIndex,
     if (bounded) {
         const hunks = diffLines(original, candidate);
         const stats = diffStats(hunks);
-        diff = `<p>按行比较：新增 ${stats.added} 行，删除 ${stats.removed} 行。直接在下方选择原版或新版。</p>`;
+        diff = `<p>按行比较：新增 ${stats.added} 行，删除 ${stats.removed} 行。在下方勾选要保留的内容。</p>`;
     } else {
         diff = '<p>内容较长，已跳过自动差异计算。请展开下方原文查看；每版最多显示前 20 万字符。</p>';
     }

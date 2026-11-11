@@ -80,7 +80,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.12.1';
+    const pluginVersion = '1.12.2';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1651,9 +1651,11 @@ export function initNovelUI(host) {
                                 });
                                 preview.addEventListener('click', () => {
                                     const count = plan.filter((group) => group.type === 'choice').length;
-                                    const selected = Array.from(
-                                        { length: count },
-                                        (_, i) => area.querySelector(`input[name="nag-merge-${i}"]:checked`)?.value,
+                                    const selected = Array.from({ length: count }, (_, i) =>
+                                        Array.from(
+                                            area.querySelectorAll(`input[name="nag-merge-${i}"]:checked`),
+                                            (input) => input.value,
+                                        ),
                                     );
                                     try {
                                         const text = mergeRolePlan(plan, selected);
