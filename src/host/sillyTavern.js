@@ -1120,7 +1120,7 @@ export function createSillyTavernHost({
         async confirmRoleRestart() {
             return !!(await getContext().Popup.show.confirm(
                 '从头生成全部角色',
-                '将清除完成进度并从名单第一项重新生成；已有候选回复仍然保留。是否继续？',
+                '将清除完成进度并从名单第一项重新生成；已有候选回复仍然保留。名录中的名字仍会跳过，需要重新生成请先在“已完成角色名录”中删除。是否继续？',
             ));
         },
         readSettings(name) {

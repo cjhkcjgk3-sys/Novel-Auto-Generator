@@ -1,8 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRoleBatchRunner, parseRoleNames } from '../../src/novel/roleBatch.js';
 import {
+    applyArchiveSkips,
     countUnidentifiedRolePages,
     duplicateRoleNames,
+    mergeRoleArchive,
+    normalizeRoleArchive,
+    removeRoleArchiveName,
     unidentifiedRolePageSignature,
 } from '../../src/novel/roleBatchState.js';
 
@@ -112,15 +116,59 @@ function setup(replies = [{ text: '结果' }]) {
         restoreRoleTemplate: vi.fn(async () => {}),
     };
     const notify = vi.fn();
+    const archived = vi.fn();
     const runner = createRoleBatchRunner({
         getSettings: () => settings,
         host,
         notify,
         onChange: vi.fn(),
         onStats: vi.fn(),
+        onRoleComplete: archived,
     });
-    return { settings, host, snapshot, runner, notify };
+    return { settings, host, snapshot, runner, notify, archived };
 }
+
+it('normalizes the finished-role archive by trimmed unique names', () => {
+    expect(normalizeRoleArchive([' 琴 ', '琴', '', '安柏', null, { name: ' 丽莎 ' }])).toEqual(['琴', '安柏', '丽莎']);
+    expect(normalizeRoleArchive('nope')).toEqual([]);
+    expect(mergeRoleArchive(['琴'], ['安柏', ' 琴 ', ''])).toEqual(['琴', '安柏']);
+    expect(removeRoleArchiveName(['琴', '安柏'], ' 琴 ')).toEqual(['安柏']);
+    expect(removeRoleArchiveName(undefined, '琴')).toEqual([]);
+});
+
+it('marks archived names as finished and releases them once deleted from the archive', () => {
+    const batch = {
+        id: 'b',
+        names: ['琴', '安柏'],
+        items: [
+            { id: 'a', name: '琴' },
+            { id: 'b', name: '安柏' },
+        ],
+        history: [],
+    };
+    expect(applyArchiveSkips(batch, [' 琴 '])).toEqual(['琴']);
+    expect(batch.items[0]).toMatchObject({ archived: true, processed: true, failed: false });
+    expect(batch.index).toBe(1);
+    expect(applyArchiveSkips(batch, [])).toEqual([]);
+    expect(batch.items[0].archived).toBe(false);
+    expect(batch.items[0].processed).toBe(false);
+    expect(batch.index).toBe(0);
+});
+
+it('skips archived names without calling the model and records new completions', async () => {
+    vi.useFakeTimers();
+    const { settings, host, runner, archived } = setup();
+    settings.roleNames = '琴\n安柏';
+    settings.roleArchive = ['琴'];
+    await vi.runAllTimersAsync();
+    const task = runner.start();
+    await vi.runAllTimersAsync();
+    await task;
+    expect(host.generateRoleReply.mock.calls.map((call) => call[1])).toEqual(['生成 安柏，名字为 安柏']);
+    expect(settings.roleBatch.items[0]).toMatchObject({ name: '琴', archived: true, processed: true });
+    expect(settings.roleBatch.index).toBe(2);
+    expect(archived.mock.calls.map((call) => call[0])).toEqual(['安柏']);
+});
 
 it('substitutes all placeholders and runs each unique full name once with an automatic total', async () => {
     vi.useFakeTimers();

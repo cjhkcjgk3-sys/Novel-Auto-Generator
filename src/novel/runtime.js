@@ -2,7 +2,15 @@ import { createRoleSelectionUI } from '../host/roleSelection.js';
 import { buildRoleMergePlan, mergeRolePlan, renderRoleComparison, validateRoleMerge } from './roleComparison.js';
 import { createBufferedStream } from '../host/bufferedStream.js';
 import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recoveryStore.js';
-import { countUnidentifiedRolePages, duplicateRoleNames, roleComplete, updateRoleNames } from './roleBatchState.js';
+import {
+    countUnidentifiedRolePages,
+    duplicateRoleNames,
+    mergeRoleArchive,
+    normalizeRoleArchive,
+    removeRoleArchiveName,
+    roleComplete,
+    updateRoleNames,
+} from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
@@ -26,6 +34,8 @@ export function initNovelUI(host) {
         generationMode: 'novel',
         roleNames: '',
         roleBatch: null,
+        // 已完成角色名录（全局共用）：生成名单里出现这个名字时自动跳过，避免重复生成。
+        roleArchive: [],
         errorLog: [],
         isRunning: false,
         isPaused: false,
@@ -68,6 +78,7 @@ export function initNovelUI(host) {
 
         panelCollapsed: {
             generate: false,
+            archive: true,
             export: false,
             extract: true,
             advanced: true,
@@ -80,7 +91,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.12.3';
+    const pluginVersion = '1.12.4';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -600,6 +611,10 @@ export function initNovelUI(host) {
         onStats: (stats) => {
             generationStats = stats;
         },
+        onRoleComplete: (name) => {
+            // onChange/saveSettings follows every checkpoint, so this is persisted with the batch.
+            settings.roleArchive = mergeRoleArchive(settings.roleArchive, [name]);
+        },
     });
     resultIsolation = host.createRoleResultIsolation({
         getBatch: () =>
@@ -822,6 +837,7 @@ export function initNovelUI(host) {
             .restoreLegacyVisibility()
             .catch((error) => recordError(error, { phase: 'restore-legacy-visibility' }));
         settings.panelCollapsed = Object.assign({}, defaultSettings.panelCollapsed, settings.panelCollapsed || {});
+        settings.roleArchive = normalizeRoleArchive(settings.roleArchive);
         settings.isRunning = false;
         settings.isPaused = false;
         try {
@@ -836,6 +852,31 @@ export function initNovelUI(host) {
 
     function saveSettings() {
         host.writeSettings(extensionName, settings);
+    }
+
+    let renderedArchiveKey = null;
+    function renderRoleArchive(names) {
+        const key = names.join('\n');
+        if (key === renderedArchiveKey) return;
+        renderedArchiveKey = key;
+        $('#nag-archive-count').text(names.length ? `（${names.length}）` : '');
+        const rows = names.map(
+            (name, index) =>
+                `<div class="nag-archive-row"><span class="nag-archive-name">${escapeHtml(name)}</span><button type="button" class="menu_button nag-archive-remove" data-index="${index}">删除</button></div>`,
+        );
+        $('#nag-archive-list').html(
+            rows.length
+                ? rows.join('')
+                : '<small class="nag-hint">还没有收录任何角色。生成成功会自动收录，也可以在下面批量添加。</small>',
+        );
+    }
+
+    function saveRoleArchive(next, message) {
+        settings.roleArchive = normalizeRoleArchive(next);
+        saveSettings();
+        renderedArchiveKey = null;
+        updateUI();
+        if (message) toastr.info(message);
     }
 
     function updateUI() {
@@ -862,6 +903,9 @@ export function initNovelUI(host) {
         $('#nag-set-total').prop('readOnly', batchMode);
         if (batchMode) $('#nag-set-total').val(roleNames.length);
         $('#nag-role-name-hint, #nag-btn-import-worldbook').toggle(batchMode);
+        const archiveNames = normalizeRoleArchive(settings.roleArchive);
+        const archiveNameSet = new Set(archiveNames);
+        renderRoleArchive(archiveNames);
         const repeatedNames = batchMode ? duplicateRoleNames(settings.roleNames) : [];
         $('#nag-role-duplicate-hint')
             .toggle(repeatedNames.length > 0)
@@ -887,6 +931,7 @@ export function initNovelUI(host) {
         $('#nag-role-correction-toggle')
             .toggle(batchMode && !!batch)
             .prop('disabled', busy);
+        $('#nag-panel-archive').toggle(batchMode);
         $('#nag-role-correction-toggle').text(roleCorrection ? '完成纠错' : '手动纠错');
         $('#nag-role-correction-hint').toggle(batchMode && roleCorrection && !!batch);
         $('#nag-btn-import-worldbook, #nag-btn-export-json').prop('disabled', busy);
@@ -913,11 +958,15 @@ export function initNovelUI(host) {
                               const item = batch?.items[index] || {};
                               const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
                               const manual = item.manualStatus ? '（手动）' : '';
+                              const archivedMark =
+                                  item.archived || (!roleComplete(item) && archiveNameSet.has(String(name).trim()))
+                                      ? '（名录）'
+                                      : '';
                               const controls =
                                   roleCorrection && item.id && !busy
                                       ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete" ${busy ? 'disabled' : ''}>✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed" ${busy ? 'disabled' : ''}>✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto" ${busy ? 'disabled' : ''}>自动</button></span>`
                                       : '';
-                              return `<div class="ttw-memory-item nag-role-status-row"><span>${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}</span>${controls}</div>`;
+                              return `<div class="ttw-memory-item nag-role-status-row"><span>${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}</span>${controls}</div>`;
                           })
                           .join('')
                     : '',
@@ -1043,6 +1092,26 @@ export function initNovelUI(host) {
                         <button type="button" id="nag-role-correction-toggle" class="menu_button" style="display:none">手动纠错</button>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
+                    </div>
+                </div>
+
+                <!-- 🗂️ 已完成角色名录模块 -->
+                <div id="nag-panel-archive" class="nag-section nag-settings nag-collapsible">
+                    <div class="nag-panel-header" data-panel="archive">
+                        <span class="nag-panel-title">🗂️ 已完成角色名录<span id="nag-archive-count"></span></span>
+                        <div class="nag-panel-actions">
+                            <span class="nag-collapse-icon">▼</span>
+                        </div>
+                    </div>
+                    <div class="nag-panel-content">
+                        <small class="nag-hint">生成成功会自动收录名字；生成名单里出现名录中的名字时自动跳过并标记“（名录）”，不会重复生成。想重新生成某个角色，先在这里删除它的名字。名录在所有聊天中共用，不写入角色卡或世界书。</small>
+                        <div id="nag-archive-list" class="nag-archive-list"></div>
+                        <div class="nag-btn-row">
+                            <button type="button" id="nag-btn-archive-collect" class="menu_button">收录当前已完成</button>
+                            <button type="button" id="nag-btn-archive-clear" class="menu_button">清空名录</button>
+                        </div>
+                        <div class="nag-setting-item"><label>批量添加</label><textarea id="nag-archive-input" rows="2" placeholder="每行一个完整角色名"></textarea></div>
+                        <button type="button" id="nag-btn-archive-add" class="menu_button">添加</button>
                     </div>
                 </div>
 
@@ -1323,6 +1392,48 @@ export function initNovelUI(host) {
             settings.errorLog = [];
             saveSettings();
             toastr.info('错误日志已清空');
+        });
+        $('#nag-btn-archive-add').on('click', () => {
+            const names = parseRoleNames(String($('#nag-archive-input').val() || ''));
+            if (!names.length) return toastr.info('请先输入角色名，每行一个');
+            const before = normalizeRoleArchive(settings.roleArchive).length;
+            const merged = mergeRoleArchive(settings.roleArchive, names);
+            $('#nag-archive-input').val('');
+            if (merged.length === before) return toastr.info('这些名字都已在名录中');
+            saveRoleArchive(merged, `已收录 ${merged.length - before} 个名字`);
+        });
+        $('#nag-btn-archive-collect').on('click', () => {
+            const batch = settings.roleBatch;
+            if (!batch) return toastr.info('当前没有批量任务记录');
+            const names = [...(batch.items || []), ...(batch.history || [])]
+                .filter((item) => roleComplete(item) && item.name)
+                .map((item) => item.name);
+            if (!names.length) return toastr.info('当前没有已完成的角色可收录');
+            const before = normalizeRoleArchive(settings.roleArchive).length;
+            const merged = mergeRoleArchive(settings.roleArchive, names);
+            if (merged.length === before) return toastr.info('已完成角色都已在名录中');
+            saveRoleArchive(merged, `已收录 ${merged.length - before} 个已完成角色`);
+        });
+        $('#nag-archive-list').on('click', '.nag-archive-remove', function () {
+            const name = normalizeRoleArchive(settings.roleArchive)[Number($(this).attr('data-index'))];
+            if (!name) return;
+            saveRoleArchive(
+                removeRoleArchiveName(settings.roleArchive, name),
+                `已从名录删除「${name}」，下次开始时会重新生成`,
+            );
+        });
+        $('#nag-btn-archive-clear').on('click', async () => {
+            if (!normalizeRoleArchive(settings.roleArchive).length) return toastr.info('名录已经为空');
+            const popup = host.getContext()?.Popup?.show;
+            if (
+                typeof popup?.confirm === 'function' &&
+                !(await popup.confirm(
+                    '清空已完成角色名录',
+                    '只会删除名录中的名字，不会删除任何角色卡或回复。确定清空？',
+                ))
+            )
+                return;
+            saveRoleArchive([], '已完成角色名录已清空');
         });
         $('#nag-btn-export-txt').on('click', () => exportNovel(false));
         $('#nag-btn-export-json').on('click', () => exportAsJSON(false));

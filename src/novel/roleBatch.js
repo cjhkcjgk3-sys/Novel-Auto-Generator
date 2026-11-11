@@ -1,6 +1,13 @@
 import { abortableDelay, throwIfAborted } from '../../txtToWorldbook/core/requestPolicy.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
-import { hydrateRoleBatch, nextRoleIndex, roleComplete, updateRoleNames, parseRoleNames } from './roleBatchState.js';
+import {
+    applyArchiveSkips,
+    hydrateRoleBatch,
+    nextRoleIndex,
+    roleComplete,
+    updateRoleNames,
+    parseRoleNames,
+} from './roleBatchState.js';
 import { readRoleWorldbook } from './roleWorldbook.js';
 import { isRoleCardTruncated } from './tagFilters.js';
 
@@ -8,7 +15,16 @@ export const ROLE_PLACEHOLDER = '[[角色名]]';
 export { parseRoleNames } from './roleBatchState.js';
 
 /** One sequential batch, using the existing settings and controls. */
-export function createRoleBatchRunner({ getSettings, host, onChange, notify, onStats, onError = () => {}, recovery }) {
+export function createRoleBatchRunner({
+    getSettings,
+    host,
+    onChange,
+    notify,
+    onStats,
+    onError = () => {},
+    recovery,
+    onRoleComplete = () => {},
+}) {
     let active = null;
     let preparing = false;
     let restored = false;
@@ -167,9 +183,15 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
             updateRoleNames(batch, names);
             batch.inputNames = settings.roleNames;
             batch.inputLimit = settings.totalChapters;
+            const archivedSkips = applyArchiveSkips(batch, settings.roleArchive);
+            if (archivedSkips.length)
+                notify(
+                    'info',
+                    `名录中已有 ${archivedSkips.length} 个角色，本次跳过：${archivedSkips.slice(0, 5).join('、')}${archivedSkips.length > 5 ? '…' : ''}；要重新生成请先在名录中删除。`,
+                );
             checkpoint();
             if (batch.index >= batch.names.length) {
-                notify('info', '名单已全部完成，已有成品已跳过；需要重做请用“从头生成”');
+                notify('info', '名单已全部完成，已有成品与名录条目已跳过；需要重做请先从“已完成角色名录”删除对应名字');
                 return;
             }
             if (host.confirmUnidentifiedRolePages && !(await host.confirmUnidentifiedRolePages(batch))) return;
@@ -247,6 +269,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                             ),
                             swipe: reply.swipe,
                         };
+                        if (!batch.items[batch.index].failed) onRoleComplete(batch.items[batch.index].name);
                         const truncated =
                             reply.truncated ||
                             isRoleCardTruncated(reply.text, {
@@ -668,7 +691,10 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                 const item = batch.items[index];
                 if (!item || item.id !== previous.items[index].id) throw new Error('角色名单已变化，请重新选择');
                 item.manualStatus = status === 'auto' ? null : status;
-                if (status === 'complete') Object.assign(item, { processed: true, failed: false, processing: false });
+                if (status === 'complete') {
+                    Object.assign(item, { processed: true, failed: false, processing: false });
+                    onRoleComplete(item.name);
+                }
                 if (status === 'failed') Object.assign(item, { processed: true, failed: true, processing: false });
                 if (status === 'auto') await host.reconcileRoleBatch(batch, validationOptions());
                 if (host.snapshot().identity !== batch.identity) throw new Error('聊天已切换，请返回原聊天');
@@ -728,6 +754,7 @@ export function createRoleBatchRunner({ getSettings, host, onChange, notify, onS
                     settings.roleBatch = batch;
                     settings.roleNames = batch.inputNames;
                     settings.totalChapters = batch.names.length;
+                    roles.forEach((role) => onRoleComplete(role.item.name));
                     checkpoint();
                     committed = true;
                 });

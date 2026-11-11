@@ -77,6 +77,64 @@ export const nextRoleIndex = (batch) => {
     return index < 0 ? batch.names.length : index;
 };
 
+/** Normalize the finished-role archive: trimmed, de-duplicated, original order kept. */
+export function normalizeRoleArchive(archive) {
+    const names = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(archive) ? archive : []) {
+        const name = String((typeof entry === 'string' ? entry : entry?.name) || '').trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        names.push(name);
+    }
+    return names;
+}
+
+export function mergeRoleArchive(archive, names) {
+    const merged = normalizeRoleArchive(archive);
+    const known = new Set(merged);
+    for (const value of names || []) {
+        const name = String(value || '').trim();
+        if (!name || known.has(name)) continue;
+        known.add(name);
+        merged.push(name);
+    }
+    return merged;
+}
+
+export function removeRoleArchiveName(archive, name) {
+    const target = String(name || '').trim();
+    return normalizeRoleArchive(archive).filter((entry) => entry !== target);
+}
+
+/**
+ * Mark list entries the persisted archive already holds as finished without generating them again.
+ * Releasing a name from the archive lets the next run regenerate that role.
+ */
+export function applyArchiveSkips(batch, archive) {
+    const archived = new Set(normalizeRoleArchive(archive));
+    const skipped = [];
+    for (const item of batch?.items || []) {
+        const name = String(item.name || '').trim();
+        if (archived.has(name)) {
+            if (roleComplete(item)) continue;
+            Object.assign(item, {
+                archived: true,
+                processed: true,
+                failed: false,
+                processing: false,
+                manualStatus: null,
+                swipe: null,
+            });
+            skipped.push(name);
+        } else if (item.archived) {
+            Object.assign(item, { archived: false, processed: false, processing: false });
+        }
+    }
+    if (batch?.names) batch.index = nextRoleIndex(batch);
+    return skipped;
+}
+
 export function hydrateRoleBatch(batch) {
     if (!batch) return null;
     const legacy = !batch.id;
