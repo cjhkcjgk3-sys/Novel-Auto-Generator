@@ -47,3 +47,21 @@ it('detects unclosed tags, unclosed code blocks and truncated text as incomplete
     expect(isRoleCardTruncated('琴', { minLength: 50 })).toBe(true);
     expect(isRoleCardTruncated('这是一个字数足够多的角色设定描述文本内容。', { minLength: 10 })).toBe(false);
 });
+
+it('treats an explicit closing marker as the end of the card', () => {
+    // 单独一行的 [end] / [结束] / [/card] 说明流是完整结束的
+    const withEnd = (body) => `[start]\n<character_design_complex>\n${body}\n</character_design_complex>\n[end]`;
+    // 装饰性标签不成对、代码块没闭合，都不再当作截断证据
+    expect(isRoleCardTruncated(withEnd('【属性】\n<属性>\n火力：S\n防空：A'))).toBe(false);
+    expect(isRoleCardTruncated(withEnd('【示例】\n```json\n{"a":1}'))).toBe(false);
+    expect(isRoleCardTruncated('[start]\n<character_design_complex>\n正文\n[/card]')).toBe(false);
+    // 没有结束标记时，原有的截断判断照常生效
+    expect(isRoleCardTruncated('[start]\n<character_design_complex>\n【属性】\n<属性>\n火力：S')).toBe(true);
+    expect(isRoleCardTruncated('[start]\n<character_design_complex>\n正文说完了一半，')).toBe(true);
+});
+
+it('ignores decorative tags deep inside a long card', () => {
+    const longBody = `${'设定内容。'.repeat(120)}\n<装饰标签>\n${'更多设定。'.repeat(120)}`;
+    // 标签只检查开头的外层结构，正文深处的不成对标签不算截断
+    expect(isRoleCardTruncated(`<character_design_complex>\n${longBody}\n</character_design_complex>`)).toBe(false);
+});

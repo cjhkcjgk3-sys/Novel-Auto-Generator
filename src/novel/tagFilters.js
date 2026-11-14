@@ -62,6 +62,19 @@ export function applyTagFilters(text, options = {}) {
  * 校验角色卡文本是否完整闭合。
  * 若出现未闭合的代码块（```）、未配对的XML/结构标签、末尾截断标点或字数不足，则判定为截断。
  */
+/** 单独一行的短标记，如 [end] / [结束] / [/card]。 */
+const CLOSING_MARKER_PATTERN = /^\[\s*\/?[^\]\n]{1,16}\s*\]$/;
+
+function endsWithClosingMarker(text) {
+    const lines = text.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index--) {
+        const line = lines[index].trim();
+        if (!line) continue;
+        return CLOSING_MARKER_PATTERN.test(line);
+    }
+    return false;
+}
+
 export function isRoleCardTruncated(text, options = {}) {
     if (!text || typeof text !== 'string') return false;
     const trimmed = text.trim();
@@ -71,6 +84,13 @@ export function isRoleCardTruncated(text, options = {}) {
 
     if (minLength > 0 && trimmed.length < minLength) {
         return true;
+    }
+
+    // 以显式结束标记收尾（例如单独一行的 [end]、[结束]）：流一定是完整结束的，
+    // 后面这些"截断特征"就不再作为判据。长篇卡里常有不成对的装饰性标签或代码块，
+    // 拿它们当截断证据会误杀完整卡片。
+    if (endsWithClosingMarker(trimmed)) {
+        return false;
     }
 
     // 1. Markdown 代码块三反引号成对闭合检查（奇数个 ``` 必然未闭合截断）
@@ -107,8 +127,11 @@ export function isRoleCardTruncated(text, options = {}) {
         'track',
         'wbr',
     ]);
+    // 只检查开头这一段：结尾缺了外层包装才是截断的证据；正文深处的装饰性标签
+    // 不说明卡片没写完，却很容易不成对。
+    const header = trimmed.replace(/```[\s\S]*?```/g, ' ').slice(0, 500);
     let match;
-    while ((match = tagPattern.exec(trimmed)) !== null) {
+    while ((match = tagPattern.exec(header)) !== null) {
         const tagName = match[1].toLowerCase();
         if (voidTags.has(tagName) || /\/\s*>$/.test(match[0])) continue;
         openTags.push(tagName);
