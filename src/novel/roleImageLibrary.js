@@ -58,6 +58,7 @@ function workKeysOf(workNames) {
 /**
  * Split a name into role and notes, dropping the work name wherever it appears as a prefix or
  * as bracket content. `安比（绝区零）改`, `绝区零安比改` and `安比（改）` all give key `安比改`.
+ * `work` is the removed work name (compact form), or '' when the name carries none.
  */
 export function parseRoleImageName(value, workNames = []) {
     return parseWithWorkKeys(value, workKeysOf(workNames));
@@ -84,17 +85,23 @@ function parseWithWorkKeys(value, workKeys) {
     }
     if (depth > 0) outside += current;
     const workSet = new Set(workKeys);
-    const notes = groups.map(compact).filter((note) => note && !workSet.has(note));
+    const compactGroups = groups.map(compact);
+    const notes = compactGroups.filter((note) => note && !workSet.has(note));
+    let work = compactGroups.find((note) => workSet.has(note)) || '';
     let role = compact(outside);
     for (const key of workKeys) {
         if (role.length > key.length && role.startsWith(key)) {
             role = role.slice(key.length);
+            work ||= key;
             break;
         }
     }
-    if (workSet.has(role)) role = '';
+    if (workSet.has(role)) {
+        work ||= role;
+        role = '';
+    }
     if (!role && notes.length) role = notes.shift();
-    return { role, notes, key: role + notes.join('') };
+    return { role, notes, key: role + notes.join(''), work };
 }
 
 function addToIndex(map, key, item) {
@@ -110,7 +117,11 @@ function itemNames(item) {
 /** Build both lookup tiers once per library. */
 export function createRoleImageIndex(library) {
     const workKeys = workKeysOf(library?.workNames);
-    const index = { exact: new Map(), role: new Map(), workKeys, cache: new Map() };
+    // The library's own name (清单标题 or folder) never conflicts; only other work names, such as the
+    // games listed in a mixed folder's 作品别名, are compared.
+    const ownWork = compact(library?.workName || (Array.isArray(library?.workNames) ? library.workNames[0] : ''));
+    const neutralWorks = new Set(ownWork ? [ownWork] : []);
+    const index = { exact: new Map(), role: new Map(), workKeys, neutralWorks, itemWorks: new Map(), cache: new Map() };
     if (!Array.isArray(library?.items)) return index;
     const items = library.items.filter((item) => item?.path);
     const roleAliases = new Map();
@@ -128,6 +139,8 @@ export function createRoleImageIndex(library) {
         }
     }
     for (const { item, parsed } of parsedItems) {
+        const works = parsed.map((entry) => entry.work).filter((work) => work && !neutralWorks.has(work));
+        if (works.length) index.itemWorks.set(item.path, works);
         for (const name of itemNames(item)) addToIndex(index.exact, compact(name), item);
         for (const entry of parsed) {
             addToIndex(index.role, entry.key, item);
@@ -148,6 +161,22 @@ function cachedIndex(library) {
         indexCache.set(library, index);
     }
     return index;
+}
+
+/** Two work names are the same work when equal or one extends the other (`尼尔` / `尼尔：机械纪元`). */
+function isSameWork(a, b) {
+    return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
+/** Drop candidates whose file name carries a different work name than the roster name. */
+function filterSameWork(matches, work, index) {
+    if (!matches?.size || !work || index.neutralWorks?.has(work) || !index.itemWorks) return matches;
+    const kept = new Map();
+    for (const [key, item] of matches) {
+        const works = index.itemWorks.get(item.path);
+        if (!works || works.some((itemWork) => isSameWork(itemWork, work))) kept.set(key, item);
+    }
+    return kept;
 }
 
 function candidateNames(matches) {
@@ -182,7 +211,14 @@ function resolveRoleImage(name, index) {
         };
     }
     const parsed = parseWithWorkKeys(name, index.workKeys);
-    const roleMatches = parsed.key ? index.role.get(parsed.key) : null;
+    const allRoleMatches = parsed.key ? index.role.get(parsed.key) : null;
+    const roleMatches = filterSameWork(allRoleMatches, parsed.work, index);
+    if (allRoleMatches?.size && !roleMatches?.size)
+        return {
+            status: 'none',
+            item: null,
+            reason: `有「${parsed.key}」的图片，但属于其他作品（${candidateNames(allRoleMatches).join('、')}），作品名不同，不使用`,
+        };
     if (roleMatches?.size === 1)
         return {
             status: 'matched',

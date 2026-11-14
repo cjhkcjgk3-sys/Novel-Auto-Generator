@@ -154,11 +154,13 @@ describe('role image name matching', () => {
             role: '安比改',
             notes: [],
             key: '安比改',
+            work: '绝区零',
         });
         expect(parseRoleImageName('【绝区零】安比（改）', ['绝区零'])).toEqual({
             role: '安比',
             notes: ['改'],
             key: '安比改',
+            work: '绝区零',
         });
         expect(parseRoleImageName('绝区零·安比', ['绝区零']).key).toBe('安比');
         expect(parseRoleImageName('「11号」', ['绝区零']).key).toBe('11号');
@@ -525,5 +527,42 @@ describe('checklist roles → roster', () => {
             skipped: 1,
         });
         expect(addNamesToRoster('', ['拉菲（泳装）']).text).toBe('拉菲（泳装）');
+    });
+});
+
+describe('role image matching in mixed-work folders', () => {
+    const item = (name) => ({ name, aliases: [], fileName: name, path: `user/images/mixed/${name}.webp` });
+    const mixed = {
+        workName: '主机与PC游戏',
+        workNames: ['主机与PC游戏', '最终幻想7', '最终幻想7重制版', '最终幻想8', '尼尔：机械纪元', '尼尔'],
+        items: [item('最终幻想7蒂法'), item('最终幻想7蒂法（女仆装）'), item('尼尔：机械纪元2B')],
+    };
+    const match = (name, lib = mixed) => matchRoleImage(name, lib, createRoleImageIndex(lib));
+
+    it('gives no image when the roster names a different game than the file', () => {
+        for (const name of ['最终幻想8蒂法', '蒂法（最终幻想8）', '最终幻想8蒂法（女仆装）']) {
+            const result = match(name);
+            expect(result.status).toBe('none');
+            expect(result.item).toBeNull();
+            expect(result.reason).toContain('作品名不同');
+        }
+    });
+
+    it('still matches the same game, aliases of it, and names without a game', () => {
+        expect(match('最终幻想7蒂法').item?.name).toBe('最终幻想7蒂法');
+        expect(match('蒂法（最终幻想7）').item?.name).toBe('最终幻想7蒂法');
+        expect(match('最终幻想7重制版蒂法').item?.name).toBe('最终幻想7蒂法');
+        expect(match('最终幻想7·蒂法（女仆装）').item?.name).toBe('最终幻想7蒂法（女仆装）');
+        expect(match('蒂法').item?.name).toBe('最终幻想7蒂法');
+        expect(match('蒂法（女仆装）').item?.name).toBe('最终幻想7蒂法（女仆装）');
+        expect(match('尼尔2B').item?.name).toBe('尼尔：机械纪元2B');
+        expect(match('主机与PC游戏蒂法').item?.name).toBe('最终幻想7蒂法');
+    });
+
+    it('uses the game name to pick between same-named roles of different games', () => {
+        const lib = { ...mixed, items: [item('最终幻想7蒂法'), item('最终幻想8蒂法')] };
+        expect(match('蒂法', lib).status).toBe('ambiguous');
+        expect(match('蒂法（最终幻想8）', lib).item?.name).toBe('最终幻想8蒂法');
+        expect(match('最终幻想7蒂法', lib).item?.name).toBe('最终幻想7蒂法');
     });
 });
