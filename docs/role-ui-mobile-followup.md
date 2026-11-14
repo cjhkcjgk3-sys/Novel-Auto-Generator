@@ -23,11 +23,11 @@
 **完整验证**：`npm run verify` 通过（lint、typecheck、boundaries、test），Windows CRLF 与 Prettier LF 要求冲突不影响代码逻辑。
 **基准测试**：`benchmark-role-scale.mjs` 在 Node 22.12 测得：
 
-| 操作                           | 1k 名字 | 5k 名字 | 10k 名字 |
-| ------------------------------ | ------- | ------- | -------- |
-| createRoleNameMatcher（名录）  | 1.9 ms  | 9.0 ms  | 17.6 ms  |
-| matcher.has × 全部名单         | 0.9 ms  | 4.2 ms  | 8.1 ms   |
-| applyArchiveSkips（标记跳过）  | 2.8 ms  | 15.5 ms | 30.8 ms  |
+| 操作                          | 1k 名字 | 5k 名字 | 10k 名字 |
+| ----------------------------- | ------- | ------- | -------- |
+| createRoleNameMatcher（名录） | 1.9 ms  | 9.0 ms  | 17.6 ms  |
+| matcher.has × 全部名单        | 0.9 ms  | 4.2 ms  | 8.1 ms   |
+| applyArchiveSkips（标记跳过） | 2.8 ms  | 15.5 ms | 30.8 ms  |
 
 **浏览器压力测试**：Windows、Chrome 157.0.8103.51、390×844 视口、合成宿主、真实 UI。数字为多次中位数。
 
