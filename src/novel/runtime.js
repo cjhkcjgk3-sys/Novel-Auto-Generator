@@ -103,7 +103,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.4';
+    const pluginVersion = '1.15.5';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1024,6 +1024,50 @@ export function initNovelUI(host) {
 
     let previewName = null;
 
+    // 看图打开时压一条历史记录，让手机返回键先关掉看图，而不是把扩展面板一起退回正文。
+    let previewHistoryGuard = false;
+
+    /** 手机上返回键在 WebView 里走 history.back()，所以要先占一条历史记录。 */
+    function pushPreviewHistoryGuard() {
+        if (previewHistoryGuard) return;
+        try {
+            history.pushState({ nagRoleImagePreview: true }, '');
+            previewHistoryGuard = true;
+        } catch {
+            // 没有 history 权限时忽略，返回键行为保持原样
+        }
+    }
+
+    function releasePreviewHistoryGuard() {
+        if (!previewHistoryGuard) return;
+        previewHistoryGuard = false;
+        try {
+            history.back();
+        } catch {
+            // 忽略
+        }
+    }
+
+    /** 返回键已经消费掉那条历史记录时才调用，不再回退一次，避免连环跳。 */
+    function onPreviewPopState() {
+        if (!previewHistoryGuard) return;
+        previewHistoryGuard = false;
+        closeRoleImagePreview({ fromPopstate: true });
+    }
+
+    /**
+     * 看图打开时把 Esc 拦在 window 捕获阶段：既不冒泡给酒馆，
+     * 也不让同一个按键同时做两件事。
+     */
+    function onPreviewKeydown(event) {
+        if (event.key !== 'Escape') return;
+        const preview = document.getElementById('nag-role-image-preview');
+        if (!preview || preview.hidden) return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeRoleImagePreview();
+    }
+
     /**
      * 全屏看图用原生 <dialog> 提进浏览器顶层（top layer）。
      *
@@ -1036,6 +1080,7 @@ export function initNovelUI(host) {
         // 面板重绘可能把弹层放回 #extensions_settings，每次打开都重新挂到 body 上。
         if (preview.parentElement !== document.body) document.body.appendChild(preview);
         preview.hidden = false;
+        pushPreviewHistoryGuard();
         if (typeof preview.showModal === 'function' && !preview.open) {
             try {
                 preview.showModal();
@@ -1047,7 +1092,7 @@ export function initNovelUI(host) {
         preview.setAttribute('open', '');
     }
 
-    function closeRoleImagePreview() {
+    function closeRoleImagePreview({ fromPopstate = false } = {}) {
         const preview = document.getElementById('nag-role-image-preview');
         if (!preview) return;
         if (typeof preview.close === 'function' && preview.open) preview.close();
@@ -1056,6 +1101,8 @@ export function initNovelUI(host) {
         previewName = null;
         // Drop the decoded original so only thumbnails stay in memory.
         preview.querySelector('img')?.removeAttribute('src');
+        // 返回键自己已经把历史记录退掉了，这里不能再退，否则会多跳一页。
+        if (!fromPopstate) releasePreviewHistoryGuard();
     }
 
     function syncRoleImagePreviewToggle() {
@@ -1887,9 +1934,13 @@ export function initNovelUI(host) {
                 target.classList?.contains('nag-role-image-preview-dialog');
             if (onBackdrop || target.closest('.nag-role-image-preview-close')) closeRoleImagePreview();
         });
-        $(document).on('keydown.nagRoleImagePreview', (event) => {
-            if (event.key === 'Escape') closeRoleImagePreview();
+        // 看图里的一切操作都不要冒泡给酒馆：酒馆会当成"点了面板外面"，顺手把扩展页面收起来。
+        $('#nag-role-image-preview').on('pointerdown mousedown touchstart click', function (event) {
+            event.stopPropagation();
         });
+        // Esc 在 window 捕获阶段拦下，避免同一个按键既关看图、又触发酒馆自己的处理。
+        window.addEventListener('keydown', onPreviewKeydown, true);
+        window.addEventListener('popstate', onPreviewPopState);
         $('#nag-btn-refresh-floors').on('click', () => $('#nag-total-floors').text(getTotalFloors()));
         $('#nag-btn-refresh-preview').on('click', refreshPreview);
         // TXT转世界书入口
@@ -2315,9 +2366,12 @@ export function initNovelUI(host) {
             clearInterval(refreshTimer);
             disposed = true;
             cleanupHelp?.();
+            // 卸载时不要触发 history.back()，否则会平白退掉一页。
+            previewHistoryGuard = false;
             closeRoleImagePreview();
             $('#nag-role-image-preview').remove();
-            $(document).off('keydown.nagRoleImagePreview');
+            window.removeEventListener('keydown', onPreviewKeydown, true);
+            window.removeEventListener('popstate', onPreviewPopState);
             resultIsolation?.dispose();
             roleSelection?.dispose();
             bufferedStream.dispose();
