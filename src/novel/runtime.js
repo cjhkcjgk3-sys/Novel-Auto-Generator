@@ -104,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.7';
+    const pluginVersion = '1.15.8';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1264,13 +1264,31 @@ export function initNovelUI(host) {
         updateUI();
     }
 
+    // 名录匹配器只在名录或作品名清单变化时重建。生成时每秒都会 updateUI，
+    // 上万条名录重建一次要 160ms 以上，不能每次都现算。
+    let archiveMatcherCache = null;
+    function getArchiveMatcher(names, workNames) {
+        const workKey = Array.isArray(workNames) ? workNames.join('\u0000') : '';
+        const key = names.join('\u0000') + '\u0001' + workKey;
+        if (archiveMatcherCache?.key === key) return archiveMatcherCache.matcher;
+        const matcher = createRoleNameMatcher(names, workNames);
+        archiveMatcherCache = { key, matcher };
+        return matcher;
+    }
+
+    // 列表分页：一次只渲染这么多行，其余折叠起来。
+    const ROLE_ROWS_PAGE = 200;
+    let roleRowsLimit = ROLE_ROWS_PAGE;
+    let archiveRowsLimit = ROLE_ROWS_PAGE;
+
     let renderedArchiveKey = null;
     function renderRoleArchive(names) {
-        const key = names.join('\n');
+        const shown = names.slice(0, archiveRowsLimit);
+        const key = archiveRowsLimit + '\u0000' + names.join('\n');
         if (key === renderedArchiveKey) return;
         renderedArchiveKey = key;
         $('#nag-archive-count').text(names.length ? `（${names.length}）` : '');
-        const rows = names.map(
+        const rows = shown.map(
             (name, index) =>
                 `<div class="nag-archive-row"><span class="nag-archive-name">${escapeHtml(name)}</span><button type="button" class="menu_button nag-archive-remove" data-index="${index}">删除</button></div>`,
         );
@@ -1279,6 +1297,9 @@ export function initNovelUI(host) {
                 ? rows.join('')
                 : '<small class="nag-hint">还没有收录任何角色。生成成功会自动收录，也可以在下面批量添加。</small>',
         );
+        $('#nag-archive-more')
+            .toggle(names.length > shown.length)
+            .text(`显示更多（还剩 ${names.length - shown.length} 个）`);
     }
 
     function saveRoleArchive(next, message) {
@@ -1322,7 +1343,7 @@ export function initNovelUI(host) {
         $('#nag-btn-role-image-import, #nag-btn-role-image-clear, #nag-role-image-file').prop('disabled', busy);
         if (batchMode) renderChecklistPicker();
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
-        const archiveNameMatcher = createRoleNameMatcher(archiveNames, imageLibrary?.workNames);
+        const archiveNameMatcher = getArchiveMatcher(archiveNames, imageLibrary?.workNames);
         renderRoleArchive(archiveNames);
         const repeatedNames = batchMode ? duplicateRoleNames(settings.roleNames) : [];
         $('#nag-role-duplicate-hint')
@@ -1371,28 +1392,32 @@ export function initNovelUI(host) {
         $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
         $('#nag-role-results').toggle(batchMode);
-        renderRoleRows(
-            $('#nag-role-results')[0],
-            batchMode
-                ? roleNames.map((name, index) => {
-                      const item = batch?.items[index] || {};
-                      const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
-                      const manual = item.manualStatus ? '（手动）' : '';
-                      const archivedMark =
-                          item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
-                      const controls =
-                          roleCorrection && item.id && !busy
-                              ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`
-                              : '';
-                      return {
-                          key: `${index}:${name}`,
-                          main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}`,
-                          controls,
-                          slot: roleImageSlot(name, index, imageLibrary),
-                      };
-                  })
-                : [],
-        );
+        const allRowEntries = batchMode
+            ? roleNames.map((name, index) => {
+                  const item = batch?.items[index] || {};
+                  const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
+                  const manual = item.manualStatus ? '（手动）' : '';
+                  const archivedMark =
+                      item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
+                  const controls =
+                      roleCorrection && item.id && !busy
+                          ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`
+                          : '';
+                  return {
+                      key: `${index}:${name}`,
+                      main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}`,
+                      controls,
+                      slot: roleImageSlot(name, index, imageLibrary),
+                  };
+              })
+            : [];
+        // 上千个角色时一次性渲染全部行会让滚动明显卡顿：先渲染前面一部分，
+        // 其余用「显示更多」按需展开，编号仍然是原始的 1..N。
+        const shownRows = allRowEntries.slice(0, roleRowsLimit);
+        renderRoleRows($('#nag-role-results')[0], shownRows);
+        $('#nag-role-rows-more')
+            .toggle(allRowEntries.length > shownRows.length)
+            .text(`显示更多（还剩 ${allRowEntries.length - shownRows.length} 个）`);
         syncRoleImagePreviewToggle();
 
         const [txt, cls] = settings.isRunning
@@ -1550,6 +1575,7 @@ export function initNovelUI(host) {
                         </div>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
+                        <button type="button" id="nag-role-rows-more" class="menu_button nag-role-more" style="display:none"></button>
                     </div>
                 </div>
 
@@ -1564,6 +1590,7 @@ export function initNovelUI(host) {
                     <div class="nag-panel-content">
                         <small class="nag-hint">生成成功会自动收录名字；生成名单里出现名录中的名字时自动跳过并标记“（名录）”，不会重复生成。想重新生成某个角色，先在这里删除它的名字。名录在所有聊天中共用，不写入角色卡或世界书。</small>
                         <div id="nag-archive-list" class="nag-archive-list"></div>
+                        <button type="button" id="nag-archive-more" class="menu_button nag-role-more" style="display:none"></button>
                         <div class="nag-btn-row">
                             <button type="button" id="nag-btn-archive-collect" class="menu_button">收录当前已完成</button>
                             <button type="button" id="nag-btn-archive-clear" class="menu_button">清空名录</button>
@@ -1800,6 +1827,15 @@ export function initNovelUI(host) {
     function bindEvents() {
         $('#nag-role-correction-toggle').on('click', () => {
             roleCorrection = !roleCorrection;
+            updateUI();
+        });
+        $('#nag-role-rows-more').on('click', () => {
+            roleRowsLimit += ROLE_ROWS_PAGE;
+            updateUI();
+        });
+        $('#nag-archive-more').on('click', () => {
+            archiveRowsLimit += ROLE_ROWS_PAGE;
+            renderedArchiveKey = null;
             updateUI();
         });
         $('#nag-role-results').on('click', '.nag-role-status-set', async function () {

@@ -1266,3 +1266,11 @@
     padding: 0 8px;
     font-size: 0.85em;
 }
+
+/* 名单／名录分页：上千个角色时只渲染前面一部分，其余点这里展开 */
+.nag-role-more {
+    display: block;
+    width: 100%;
+    margin: 6px 0 2px;
+    font-size: 12px;
+}
