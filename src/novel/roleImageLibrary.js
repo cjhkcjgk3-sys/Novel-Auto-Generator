@@ -1,68 +1,234 @@
+import { canReadZipOnDemand, openZip, openZipWithJSZip } from './zipReader.js';
+
 export const ROLE_IMAGE_FOLDER = 'novel-auto-generator-role-images';
 const MANAGED_IMAGE_PREFIX = `user/images/${ROLE_IMAGE_FOLDER}/`;
-const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
-const MAX_EXPANDED_ARCHIVE_BYTES = 512 * 1024 * 1024;
+export const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_ENTRIES = 50000;
+const MANIFEST_NAME = '00-清单.md';
+export const THUMBNAIL_SIZE = 128;
 const EXTENSIONS = new Map([
     ['jpg', 'jpg'],
     ['jpeg', 'jpg'],
     ['png', 'png'],
     ['webp', 'webp'],
 ]);
+const MIME_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
 
 function uniqueStrings(values) {
     return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
-function normalizeSymbols(value) {
-    return String(value || '')
-        .normalize('NFKC')
-        .replace(/[\p{P}\p{S}\p{Cf}\s]+/gu, '');
-}
+// ============================================
+// 名称匹配：[作品名前缀] + 角色名 + [备注（皮肤/装甲/形态）]
+// ============================================
 
-export function normalizeRoleImageName(value, workNames = []) {
-    const name = normalizeSymbols(value);
-    if (!name) return '';
-    const titles = uniqueStrings(workNames.map(normalizeSymbols).filter(Boolean)).sort((a, b) => b.length - a.length);
-    for (const title of titles) {
-        if (name.length <= title.length) continue;
-        if (name.startsWith(title)) return name.slice(title.length);
-        if (name.endsWith(title)) return name.slice(0, -title.length);
+const OPEN_BRACKETS = '(（[［{｛【〔〖「『《〈<＜';
+const CLOSE_BRACKETS = ')）]］}｝】〕〗」』》〉>＞';
+
+/** Fold width, brackets and case; brackets all become ASCII parentheses. */
+function unifyName(value) {
+    let text = String(value ?? '').normalize('NFKC');
+    let result = '';
+    for (const character of text) {
+        if (OPEN_BRACKETS.includes(character)) result += '(';
+        else if (CLOSE_BRACKETS.includes(character)) result += ')';
+        else result += character;
     }
-    return name;
+    text = result.toLowerCase();
+    return text;
 }
 
+/** Remove punctuation, symbols, spaces and middle dots; keep letters, digits and CJK. */
+function compact(value) {
+    return unifyName(value).replace(/[\p{P}\p{S}\p{Cf}\p{Z}\s]+/gu, '');
+}
+
+/** Full-string key: only width, punctuation, brackets, spaces and case are ignored. */
+export function normalizeRoleImageName(value) {
+    return compact(value);
+}
+
+function workKeysOf(workNames) {
+    return uniqueStrings((Array.isArray(workNames) ? workNames : []).map(compact)).sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Split a name into role and notes, dropping the work name wherever it appears as a prefix or
+ * as bracket content. `安比（绝区零）改`, `绝区零安比改` and `安比（改）` all give key `安比改`.
+ */
+export function parseRoleImageName(value, workNames = []) {
+    return parseWithWorkKeys(value, workKeysOf(workNames));
+}
+
+function parseWithWorkKeys(value, workKeys) {
+    const text = unifyName(value);
+    let outside = '';
+    const groups = [];
+    let depth = 0;
+    let current = '';
+    for (const character of text) {
+        if (character === '(') {
+            if (depth > 0) current += character;
+            depth++;
+        } else if (character === ')' && depth > 0) {
+            depth--;
+            if (depth === 0) {
+                groups.push(current);
+                current = '';
+            } else current += character;
+        } else if (depth > 0) current += character;
+        else outside += character;
+    }
+    if (depth > 0) outside += current;
+    const workSet = new Set(workKeys);
+    const notes = groups.map(compact).filter((note) => note && !workSet.has(note));
+    let role = compact(outside);
+    for (const key of workKeys) {
+        if (role.length > key.length && role.startsWith(key)) {
+            role = role.slice(key.length);
+            break;
+        }
+    }
+    if (workSet.has(role)) role = '';
+    if (!role && notes.length) role = notes.shift();
+    return { role, notes, key: role + notes.join('') };
+}
+
+function addToIndex(map, key, item) {
+    if (!key) return;
+    if (!map.has(key)) map.set(key, new Map());
+    map.get(key).set(item.path, item);
+}
+
+function itemNames(item) {
+    return uniqueStrings([item.name, ...(Array.isArray(item.aliases) ? item.aliases : []), item.fileName]);
+}
+
+/** Build both lookup tiers once per library. */
 export function createRoleImageIndex(library) {
-    const index = new Map();
+    const workKeys = workKeysOf(library?.workNames);
+    const index = { exact: new Map(), role: new Map(), workKeys, cache: new Map() };
     if (!Array.isArray(library?.items)) return index;
-    for (const item of library.items) {
-        if (!item?.path) continue;
-        const aliases = Array.isArray(item.aliases) ? item.aliases : [];
-        const names = [item.name, ...aliases, item.fileName];
-        for (const name of names) {
-            const key = normalizeRoleImageName(name, library.workNames);
-            if (!key) continue;
-            if (!index.has(key)) index.set(key, new Map());
-            index.get(key).set(item.path, item);
+    const items = library.items.filter((item) => item?.path);
+    const roleAliases = new Map();
+    const parsedItems = items.map((item) => {
+        const parsed = itemNames(item).map((name) => parseWithWorkKeys(name, workKeys));
+        return { item, parsed };
+    });
+    // Aliases written on the base image (no 备注) also apply to that role's form images.
+    for (const { parsed } of parsedItems) {
+        const base = parsed.filter((entry) => entry.notes.length === 0).map((entry) => entry.role);
+        if (!base.length) continue;
+        for (const role of base) {
+            if (!roleAliases.has(role)) roleAliases.set(role, new Set());
+            for (const alias of base) roleAliases.get(role).add(alias);
+        }
+    }
+    for (const { item, parsed } of parsedItems) {
+        for (const name of itemNames(item)) addToIndex(index.exact, compact(name), item);
+        for (const entry of parsed) {
+            addToIndex(index.role, entry.key, item);
+            if (!entry.notes.length) continue;
+            const note = entry.notes.join('');
+            for (const alias of roleAliases.get(entry.role) || []) addToIndex(index.role, alias + note, item);
         }
     }
     return index;
 }
 
-export function findRoleImageMatch(name, library, index = createRoleImageIndex(library)) {
-    const key = normalizeRoleImageName(name, library?.workNames);
-    const matches = index.get(key);
-    return matches?.size === 1 ? matches.values().next().value : null;
+const indexCache = new WeakMap();
+function cachedIndex(library) {
+    if (!library || typeof library !== 'object') return createRoleImageIndex(library);
+    let index = indexCache.get(library);
+    if (!index) {
+        index = createRoleImageIndex(library);
+        indexCache.set(library, index);
+    }
+    return index;
+}
+
+function candidateNames(matches) {
+    return [...matches.values()].map((item) => item.name || item.fileName);
+}
+
+/**
+ * Resolve a roster name. Order: (a) exact full name, (b) 角色名+备注 with the work name removed,
+ * which is also (c) role name alone when there is no 备注. Never contains-matching; a 备注
+ * without a matching form image gives no image; two or more candidates give no image.
+ */
+export function matchRoleImage(name, library, index = cachedIndex(library)) {
+    const cacheKey = String(name ?? '');
+    if (index.cache?.has(cacheKey)) return index.cache.get(cacheKey);
+    const result = resolveRoleImage(cacheKey, index);
+    index.cache?.set(cacheKey, result);
+    return result;
+}
+
+function resolveRoleImage(name, index) {
+    const exactKey = compact(name);
+    if (!exactKey) return { status: 'none', item: null, reason: '角色名为空' };
+    const exact = index.exact.get(exactKey);
+    if (exact?.size === 1) return { status: 'matched', tier: 'exact', item: exact.values().next().value, reason: '' };
+    if (exact?.size > 1) {
+        const names = candidateNames(exact);
+        return {
+            status: 'ambiguous',
+            item: null,
+            candidates: names,
+            reason: `有 ${names.length} 张图片同名（${names.join('、')}），无法确定用哪张`,
+        };
+    }
+    const parsed = parseWithWorkKeys(name, index.workKeys);
+    const roleMatches = parsed.key ? index.role.get(parsed.key) : null;
+    if (roleMatches?.size === 1)
+        return {
+            status: 'matched',
+            tier: parsed.notes.length ? 'role-note' : 'role',
+            item: roleMatches.values().next().value,
+            reason: '',
+        };
+    if (roleMatches?.size > 1) {
+        const names = candidateNames(roleMatches);
+        return {
+            status: 'ambiguous',
+            item: null,
+            candidates: names,
+            reason: `有 ${names.length} 张图片都对应「${parsed.key}」（${names.join('、')}），无法确定用哪张`,
+        };
+    }
+    if (parsed.notes.length && index.role.get(parsed.role)?.size)
+        return {
+            status: 'none',
+            item: null,
+            reason: `有「${parsed.role}」的图片，但没有「${parsed.key}」这个备注/形态的图片，不使用本体图`,
+        };
+    const characters = [...parsed.key];
+    for (let length = characters.length - 1; length > 0; length--) {
+        const prefix = characters.slice(0, length).join('');
+        if (index.role.get(prefix)?.size)
+            return {
+                status: 'none',
+                item: null,
+                reason: `未匹配到图片（只有「${prefix}」的图片，名称不完全相同，不会自动使用）`,
+            };
+    }
+    return { status: 'none', item: null, reason: '未匹配到图片' };
+}
+
+export function findRoleImageMatch(name, library, index) {
+    return matchRoleImage(name, library, index).item;
 }
 
 export function isRoleImageDisabled(name, library) {
-    const key = normalizeRoleImageName(name, library?.workNames);
+    const key = normalizeRoleImageName(name);
     return !!key && Array.isArray(library?.noImageNames) && library.noImageNames.includes(key);
 }
 
 export function setRoleImageDisabled(name, disabled, library) {
     if (!library) return library;
-    const key = normalizeRoleImageName(name, library.workNames);
+    const key = normalizeRoleImageName(name);
     if (!key) return library;
     const names = new Set(Array.isArray(library.noImageNames) ? library.noImageNames : []);
     if (disabled) names.add(key);
@@ -74,6 +240,10 @@ export function getRoleImageForRequest(name, library) {
     if (isRoleImageDisabled(name, library)) return null;
     return findRoleImageMatch(name, library);
 }
+
+// ============================================
+// ZIP 导入
+// ============================================
 
 function normalizeZipPath(value) {
     const path = String(value || '').replace(/\\/g, '/');
@@ -92,19 +262,24 @@ function resolveZipPath(directory, relativePath) {
     }
     const relative = normalizeZipPath(decoded);
     if (!relative) return null;
-    const result = [...directory.split('/').filter(Boolean)];
-    result.push(...relative.split('/'));
-    const path = result.join('/');
-    return path.startsWith(`${directory}/`) ? path : null;
+    return directory ? `${directory}/${relative}` : relative;
 }
 
 function parseAliases(value) {
     return uniqueStrings(String(value || '').split(/[、，,/;；]+/));
 }
 
-function parseChecklist(text, directory, workName) {
-    const aliasesLine = String(text).match(/^\s*作品别名[:：]\s*(.*?)\s*$/m)?.[1] || '';
-    const workNames = uniqueStrings([workName, ...parseAliases(aliasesLine)]);
+/** Work name from `# X角色图片清单`, `作品别名：` or the folder name. */
+export function parseChecklistWorkNames(text, folderName = '') {
+    const source = String(text || '');
+    const title = source.match(/^\s*#\s+(.+?)\s*$/m)?.[1] || '';
+    const titleName = title.replace(/\s*(?:角色)?(?:图片)?(?:清单|名单|目录)\s*$/u, '').trim();
+    const aliasesLine = source.match(/^\s*作品别名[:：]\s*(.*?)\s*$/m)?.[1] || '';
+    const aliases = parseAliases(aliasesLine);
+    return uniqueStrings([titleName, folderName, ...aliases]);
+}
+
+function parseChecklist(text, directory) {
     const rows = [];
     for (const line of String(text).split(/\r?\n/)) {
         const match = line.match(/^\s*-\s*\[[ xX]\]\s*\[([^\]]+)\]\((<[^>]+>|[^)]*)\)(.*)$/);
@@ -114,7 +289,6 @@ function parseChecklist(text, directory, workName) {
         if (!name || !target || /^(?:https?:)?\/\//i.test(target)) continue;
         const path = resolveZipPath(directory, target);
         if (!path) throw new Error('清单包含不安全的图片路径');
-        if (!path.startsWith(`${directory}/`)) throw new Error('清单中的图片必须位于作品目录内');
         const extension = path.split('.').at(-1)?.toLowerCase();
         if (!EXTENSIONS.has(extension)) continue;
         const aliasText = match[3].match(/(?:^|\s)别名[:：]\s*([^;；]*?)(?:\s+备注[:：].*)?\s*$/)?.[1] || '';
@@ -122,31 +296,77 @@ function parseChecklist(text, directory, workName) {
             name,
             aliases: parseAliases(aliasText),
             path,
-            fileName: path.split('/').at(-1).replace(/\.[^.]+$/, ''),
+            fileName: path
+                .split('/')
+                .at(-1)
+                .replace(/\.[^.]+$/, ''),
         });
     }
-    return { workNames, rows };
+    return rows;
+}
+
+function isJunkEntry(name) {
+    const parts = name.split('/');
+    return parts.includes('__MACOSX') || parts.at(-1).startsWith('._');
 }
 
 function makeFileId() {
     return globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function isReadableImage(blob) {
-    if (typeof createImageBitmap === 'function') {
-        const bitmap = await createImageBitmap(blob);
+async function canvasToBlob(canvas, type, quality) {
+    if (typeof canvas.convertToBlob === 'function') return canvas.convertToBlob({ type, quality });
+    return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+/**
+ * Decode once to validate the image and draw a small thumbnail (longest side ≤ 128, top kept for
+ * tall art). Returns null for the thumbnail when the browser cannot encode one.
+ */
+export async function createBrowserThumbnail(blob, size = THUMBNAIL_SIZE) {
+    if (typeof createImageBitmap !== 'function') return { ok: await decodeWithImage(blob), thumbnail: null };
+    const bitmap = await createImageBitmap(blob);
+    try {
+        const width = bitmap.width || 1;
+        const height = bitmap.height || 1;
+        // Tall full-body art: keep a top 1:1.5 window so the face stays visible in a square slot.
+        const sourceHeight = Math.min(height, Math.round(width * 1.5));
+        const scale = Math.min(1, size / Math.max(width, sourceHeight));
+        const targetWidth = Math.max(1, Math.round(width * scale));
+        const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+        let canvas;
+        if (typeof OffscreenCanvas === 'function') canvas = new OffscreenCanvas(targetWidth, targetHeight);
+        else if (globalThis.document?.createElement) {
+            canvas = document.createElement('canvas');
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+        } else return { ok: true, thumbnail: null };
+        const context = canvas.getContext('2d');
+        if (!context) return { ok: true, thumbnail: null };
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(bitmap, 0, 0, width, sourceHeight, 0, 0, targetWidth, targetHeight);
+        let thumbnail = await canvasToBlob(canvas, 'image/webp', 0.82);
+        // Safari may ignore webp and return PNG; both keep transparency.
+        if (!thumbnail || !/^image\/(webp|png)$/.test(thumbnail.type))
+            thumbnail = await canvasToBlob(canvas, 'image/png');
+        return { ok: true, thumbnail: thumbnail?.size ? thumbnail : null };
+    } finally {
         bitmap.close?.();
-        return true;
     }
+}
+
+async function decodeWithImage(blob) {
+    if (typeof Image !== 'function' || typeof URL?.createObjectURL !== 'function') return true;
     const url = URL.createObjectURL(blob);
     try {
         const image = new Image();
         image.src = url;
         if (typeof image.decode === 'function') await image.decode();
-        else await new Promise((resolve, reject) => {
-            image.onload = resolve;
-            image.onerror = reject;
-        });
+        else
+            await new Promise((resolve, reject) => {
+                image.onload = resolve;
+                image.onerror = reject;
+            });
         return true;
     } finally {
         URL.revokeObjectURL(url);
@@ -154,7 +374,9 @@ async function isReadableImage(blob) {
 }
 
 function isManagedPath(path) {
-    return String(path || '').replace(/^\/+/, '').startsWith(MANAGED_IMAGE_PREFIX);
+    return String(path || '')
+        .replace(/^\/+/, '')
+        .startsWith(MANAGED_IMAGE_PREFIX);
 }
 
 async function deleteManagedImage(path, host) {
@@ -162,33 +384,57 @@ async function deleteManagedImage(path, host) {
     await host.deleteRoleImage(path);
 }
 
-export async function importRoleImageZip(file, host) {
+async function openArchive(file, host) {
+    if (canReadZipOnDemand()) return openZip(file);
+    const JSZip = await host.loadRoleImageZip?.();
+    if (!JSZip?.loadAsync) throw new Error('当前酒馆没有可用的 ZIP 解析器');
+    return openZipWithJSZip(file, JSZip);
+}
+
+function formatSize(bytes) {
+    return bytes >= 1024 * 1024 * 1024 ? `${bytes / 1024 / 1024 / 1024} GB` : `${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
+/**
+ * Import one work ZIP. Only the ZIP directory is read up front; each image is then read, checked,
+ * thumbnailed and uploaded one at a time and released before the next.
+ */
+export async function importRoleImageZip(
+    file,
+    host,
+    { makeThumbnail = createBrowserThumbnail, onProgress = () => {}, open = openArchive } = {},
+) {
     if (!file?.name?.toLowerCase().endsWith('.zip')) throw new Error('请选择作品 ZIP 文件');
-    if (file.size > MAX_ARCHIVE_BYTES) throw new Error('ZIP 文件超过手机导入上限（200 MB）');
-    if (
-        typeof host?.uploadRoleImage !== 'function' ||
-        typeof host?.loadRoleImageZip !== 'function' ||
-        typeof host?.deleteRoleImage !== 'function'
-    )
+    if (file.size > MAX_ARCHIVE_BYTES) throw new Error(`ZIP 文件超过导入上限（${formatSize(MAX_ARCHIVE_BYTES)}）`);
+    if (typeof host?.uploadRoleImage !== 'function' || typeof host?.deleteRoleImage !== 'function')
         throw new Error('当前酒馆没有可用的图片库接口');
 
-    const JSZip = await host.loadRoleImageZip();
-    if (!JSZip?.loadAsync) throw new Error('当前酒馆没有可用的 ZIP 解析器');
-    const archive = await JSZip.loadAsync(file);
-    const entries = Object.values(archive.files);
-    const expandedBytes = entries.reduce((total, entry) => total + (Number(entry._data?.uncompressedSize) || 0), 0);
-    if (expandedBytes > MAX_EXPANDED_ARCHIVE_BYTES)
-        throw new Error('ZIP 解压后超过手机导入上限（512 MB）');
-    const manifestEntries = entries.filter((entry) => !entry.dir && entry.name.split('/').at(-1) === '00-清单.md');
-    if (manifestEntries.length !== 1) throw new Error('ZIP 需要且只能包含一个作品的 00-清单.md');
-
-    const manifestPath = normalizeZipPath(manifestEntries[0].name);
-    if (!manifestPath) throw new Error('ZIP 中包含不安全的文件路径');
+    let archive;
+    try {
+        archive = await open(file, host);
+    } catch (error) {
+        throw new Error(`无法读取 ZIP：${error?.message || error}`);
+    }
+    if (archive.entries.length > MAX_ENTRIES) throw new Error('ZIP 里的文件太多');
+    const files = new Map();
+    for (const entry of archive.entries) {
+        if (entry.dir || isJunkEntry(entry.name)) continue;
+        const path = normalizeZipPath(entry.name);
+        if (path) files.set(path, entry);
+    }
+    const manifests = [...files.keys()].filter((path) => path.split('/').at(-1) === MANIFEST_NAME);
+    if (!manifests.length) throw new Error('ZIP 里没有找到 00-清单.md');
+    if (manifests.length > 1) throw new Error('ZIP 只能包含一个作品（发现多个 00-清单.md）');
+    const manifestPath = manifests[0];
     const directory = manifestPath.split('/').slice(0, -1).join('/');
-    if (!directory) throw new Error('请导入包含作品目录和 00-清单.md 的标准 ZIP');
-    const workName = directory.split('/').at(-1);
-    const manifest = await manifestEntries[0].async('string');
-    const { workNames, rows } = parseChecklist(manifest, directory, workName);
+    const manifestBlob = await archive.readEntry(files.get(manifestPath), { maxBytes: MAX_MANIFEST_BYTES });
+    const manifest = await manifestBlob.text();
+    const folderName = directory.split('/').at(-1) || '';
+    const zipName = file.name.replace(/\.zip$/i, '').trim();
+    const workNames = parseChecklistWorkNames(manifest, folderName);
+    const workName = workNames[0] || zipName;
+    if (!workNames.length && workName) workNames.push(workName);
+    const rows = parseChecklist(manifest, directory);
     if (!rows.length) throw new Error('清单里没有可导入的角色图片');
 
     const items = [];
@@ -196,44 +442,55 @@ export async function importRoleImageZip(file, host) {
     let saveFailures = 0;
     const uploadedPaths = [];
     try {
-        for (const row of rows) {
-            const source = archive.file(row.path);
-            if (!source || source.dir) {
+        for (const [position, row] of rows.entries()) {
+            onProgress({ done: position, total: rows.length });
+            const source = files.get(row.path);
+            if (!source) {
                 skipped++;
                 continue;
             }
+            const extension = EXTENSIONS.get(row.path.split('.').at(-1).toLowerCase());
             let blob;
+            let thumbnail = null;
             try {
-                if (Number(source._data?.uncompressedSize) > MAX_IMAGE_BYTES) {
-                    skipped++;
-                    continue;
-                }
-                blob = await source.async('blob');
-                if (!blob.size || blob.size > MAX_IMAGE_BYTES || !(await isReadableImage(blob))) {
-                    skipped++;
-                    continue;
-                }
+                blob = await archive.readEntry(source, { maxBytes: MAX_IMAGE_BYTES, type: MIME_TYPES[extension] });
+                if (!blob.size) throw new Error('empty');
+                const prepared = await makeThumbnail(blob);
+                if (!prepared?.ok) throw new Error('unreadable');
+                thumbnail = prepared.thumbnail || null;
             } catch {
                 skipped++;
                 continue;
             }
-            const originalExtension = row.path.split('.').at(-1).toLowerCase();
-            const extension = EXTENSIONS.get(originalExtension);
             const id = makeFileId();
+            let path;
             try {
-                const path = await host.uploadRoleImage(blob, id, extension);
+                path = await host.uploadRoleImage(blob, id, extension);
                 if (!isManagedPath(path)) throw new Error('酒馆返回的图片路径不在插件图片库中');
                 uploadedPaths.push(path);
-                items.push({ ...row, id, path, extension });
             } catch {
                 skipped++;
                 saveFailures++;
+                continue;
             }
+            let thumbPath = '';
+            if (thumbnail) {
+                try {
+                    const thumbExtension = thumbnail.type === 'image/png' ? 'png' : 'webp';
+                    const saved = await host.uploadRoleImage(thumbnail, `${id}-thumb`, thumbExtension);
+                    if (isManagedPath(saved)) {
+                        uploadedPaths.push(saved);
+                        thumbPath = saved;
+                    }
+                } catch {
+                    // The list falls back to the original image when no thumbnail was saved.
+                }
+            }
+            items.push({ ...row, id, path, extension, ...(thumbPath ? { thumbPath } : {}) });
         }
+        onProgress({ done: rows.length, total: rows.length });
         if (!items.length) {
-            throw new Error(
-                saveFailures ? '酒馆未能保存图片，请检查酒馆图片接口后重试' : 'ZIP 中没有可读取的角色图片',
-            );
+            throw new Error(saveFailures ? '酒馆未能保存图片，请检查酒馆图片接口后重试' : 'ZIP 中没有可读取的角色图片');
         }
         return {
             library: { workName, workNames, items, noImageNames: [] },
@@ -252,6 +509,7 @@ export async function clearRoleImageLibrary(library, host) {
     for (const item of library?.items || []) {
         try {
             await deleteManagedImage(item.path, host);
+            if (item.thumbPath) await deleteManagedImage(item.thumbPath, host).catch(() => {});
             deleted++;
         } catch {
             failedItems.push(item);

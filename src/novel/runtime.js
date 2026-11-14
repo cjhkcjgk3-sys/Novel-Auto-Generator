@@ -18,11 +18,10 @@ import { createErrorRecord } from '../../txtToWorldbook/core/logger.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
 import {
     clearRoleImageLibrary,
-    createRoleImageIndex,
-    findRoleImageMatch,
     getRoleImageForRequest,
     importRoleImageZip,
     isRoleImageDisabled,
+    matchRoleImage,
     setRoleImageDisabled,
 } from './roleImageLibrary.js';
 
@@ -101,7 +100,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.13.0';
+    const pluginVersion = '1.14.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -864,8 +863,12 @@ export function initNovelUI(host) {
         }
         fileOperation = true;
         updateUI();
+        const summary = $('#nag-role-image-library-summary');
         try {
-            const result = await importRoleImageZip(file, host);
+            summary.text('正在读取 ZIP 目录…');
+            const result = await importRoleImageZip(file, host, {
+                onProgress: ({ done, total }) => summary.text(`正在逐张导入图片 ${done}/${total}…`),
+            });
             settings.roleImageLibrary = result.library;
             saveSettings();
             toastr.success(
@@ -902,20 +905,96 @@ export function initNovelUI(host) {
         }
     }
 
+    let previewName = null;
     function closeRoleImagePreview() {
         const preview = document.getElementById('nag-role-image-preview');
-        if (preview) preview.hidden = true;
+        if (!preview) return;
+        preview.hidden = true;
+        previewName = null;
+        // Drop the decoded original so only thumbnails stay in memory.
+        preview.querySelector('img')?.removeAttribute('src');
     }
 
+    function syncRoleImagePreviewToggle() {
+        const preview = document.getElementById('nag-role-image-preview');
+        const toggle = preview?.querySelector('.nag-role-image-preview-toggle');
+        if (!toggle || previewName == null) return;
+        const disabled = isRoleImageDisabled(previewName, settings.roleImageLibrary);
+        toggle.textContent = disabled ? '恢复使用这张图' : '这个角色不用图';
+        toggle.disabled = settings.isRunning || fileOperation;
+        preview.classList.toggle('is-disabled', disabled);
+    }
+
+    /** Full-screen viewer: the original image is only fetched here, on demand. */
     function showRoleImagePreview(index) {
         const name = (settings.roleBatch?.names || parseRoleNames(settings.roleNames))[index];
-        const image = name ? findRoleImageMatch(name, settings.roleImageLibrary) : null;
+        const image = name ? matchRoleImage(name, settings.roleImageLibrary).item : null;
         const preview = document.getElementById('nag-role-image-preview');
         const imageElement = preview?.querySelector('img');
         if (!image || !preview || !imageElement) return;
+        previewName = name;
         imageElement.src = image.path;
         imageElement.alt = name;
+        const caption = preview.querySelector('.nag-role-image-preview-caption');
+        if (caption) caption.textContent = image.name === name ? name : `${name} → ${image.name}`;
+        syncRoleImagePreviewToggle();
         preview.hidden = false;
+    }
+
+    function roleImageSlot(name, index, imageLibrary) {
+        if (!imageLibrary?.items?.length) return { sig: '', html: '' };
+        const match = matchRoleImage(name, imageLibrary);
+        if (!match.item) {
+            const label = match.status === 'ambiguous' ? '?' : '';
+            return {
+                sig: `none|${match.reason}`,
+                html: `<span class="nag-role-thumb is-empty${match.status === 'ambiguous' ? ' is-ambiguous' : ''}" title="无图：${escapeAttribute(match.reason)}" aria-label="无图：${escapeAttribute(match.reason)}">${label}</span>`,
+            };
+        }
+        const disabled = isRoleImageDisabled(name, imageLibrary);
+        const src = match.item.thumbPath || match.item.path;
+        const title = `${disabled ? '已设为不用图。' : ''}点击查看原图：${match.item.name}`;
+        return {
+            sig: `img|${index}|${src}|${disabled}|${match.item.name}`,
+            html: `<button type="button" class="nag-role-thumb${disabled ? ' is-disabled' : ''}" data-index="${index}" title="${escapeAttribute(title)}" aria-label="${escapeAttribute(`${name}：${title}`)}"><img src="${escapeAttribute(src)}" alt="" loading="lazy" decoding="async" draggable="false"></button>`,
+        };
+    }
+
+    /** Update rows in place so thumbnails are not rebuilt by the 1-second refresh while running. */
+    function renderRoleRows(container, rows) {
+        if (!container) return;
+        const current = container.children;
+        const sameRows =
+            current.length === rows.length && rows.every((row, index) => current[index].dataset.rowKey === row.key);
+        if (!sameRows) {
+            container.innerHTML = rows
+                .map(
+                    (row) =>
+                        `<div class="ttw-memory-item nag-role-status-row" data-row-key="${escapeAttribute(row.key)}"><span class="nag-role-status-name">${row.main}</span><span class="nag-role-row-controls">${row.controls}</span><span class="nag-role-image-slot" data-sig="${escapeAttribute(row.slot.sig)}">${row.slot.html}</span></div>`,
+                )
+                .join('');
+            [...container.children].forEach((element, index) => {
+                element.nagMain = rows[index].main;
+                element.nagControls = rows[index].controls;
+            });
+            return;
+        }
+        rows.forEach((row, index) => {
+            const element = current[index];
+            const [main, controls, slot] = element.children;
+            if (element.nagMain !== row.main) {
+                main.innerHTML = row.main;
+                element.nagMain = row.main;
+            }
+            if (element.nagControls !== row.controls) {
+                controls.innerHTML = row.controls;
+                element.nagControls = row.controls;
+            }
+            if (slot.dataset.sig !== row.slot.sig) {
+                slot.innerHTML = row.slot.html;
+                slot.dataset.sig = row.slot.sig;
+            }
+        });
     }
 
     // ============================================
@@ -1004,7 +1083,6 @@ export function initNovelUI(host) {
         $('#nag-role-image-library-summary').text(
             imageCount ? `${imageLibrary.workName}：${imageCount} 张图片` : '尚未导入作品图片',
         );
-        const roleImageIndex = createRoleImageIndex(imageLibrary);
         $('#nag-btn-role-image-import, #nag-btn-role-image-clear, #nag-role-image-file').prop('disabled', busy);
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
         const archiveNameSet = new Set(archiveNames);
@@ -1055,40 +1133,32 @@ export function initNovelUI(host) {
         $('#nag-minlen-label').text(batchMode ? '最小字数（防截断）' : '最小章节长度');
         $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
-        $('#nag-role-results')
-            .toggle(batchMode)
-            .html(
-                batchMode
-                    ? roleNames
-                          .map((name, index) => {
-                              const item = batch?.items[index] || {};
-                              const image = findRoleImageMatch(name, imageLibrary, roleImageIndex);
-                              const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
-                              const manual = item.manualStatus ? '（手动）' : '';
-                              const archivedMark =
-                                  item.archived || (!roleComplete(item) && archiveNameSet.has(String(name).trim()))
-                                      ? '（名录）'
-                                      : '';
-                              const imageControls = image
-                                  ? `<span class="nag-role-image-controls">
-                                        <button type="button" class="nag-role-image-preview" data-index="${index}" title="预览角色图片" aria-label="预览 ${escapeAttribute(name)} 的角色图片">
-                                            <img src="${escapeAttribute(image.path)}" alt="" loading="lazy" decoding="async">
-                                        </button>
-                                        <label class="nag-role-image-toggle">
-                                            <input type="checkbox" class="nag-role-image-disabled" data-index="${index}" ${isRoleImageDisabled(name, imageLibrary) ? 'checked' : ''} ${busy ? 'disabled' : ''}>
-                                            <span>不用图</span>
-                                        </label>
-                                    </span>`
-                                  : '';
-                              const controls =
-                                  roleCorrection && item.id && !busy
-                                      ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete" ${busy ? 'disabled' : ''}>✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed" ${busy ? 'disabled' : ''}>✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto" ${busy ? 'disabled' : ''}>自动</button></span>`
-                                      : '';
-                              return `<div class="ttw-memory-item nag-role-status-row"><div class="nag-role-status-main"><span class="nag-role-status-name">${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}</span>${imageControls}</div>${controls}</div>`;
-                          })
-                          .join('')
-                    : '',
-            );
+        $('#nag-role-results').toggle(batchMode);
+        renderRoleRows(
+            $('#nag-role-results')[0],
+            batchMode
+                ? roleNames.map((name, index) => {
+                      const item = batch?.items[index] || {};
+                      const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
+                      const manual = item.manualStatus ? '（手动）' : '';
+                      const archivedMark =
+                          item.archived || (!roleComplete(item) && archiveNameSet.has(String(name).trim()))
+                              ? '（名录）'
+                              : '';
+                      const controls =
+                          roleCorrection && item.id && !busy
+                              ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`
+                              : '';
+                      return {
+                          key: `${index}:${name}`,
+                          main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}`,
+                          controls,
+                          slot: roleImageSlot(name, index, imageLibrary),
+                      };
+                  })
+                : [],
+        );
+        syncRoleImagePreviewToggle();
 
         const [txt, cls] = settings.isRunning
             ? settings.isPaused
@@ -1208,7 +1278,7 @@ export function initNovelUI(host) {
                                 <input id="nag-role-image-file" type="file" accept=".zip,application/zip" hidden>
                             </div>
                             <small id="nag-role-image-library-summary" class="nag-hint">尚未导入作品图片</small>
-                            <small class="nag-hint">自动精确匹配角色全名，忽略标点和作品名前后；没有匹配图时照常生成。</small>
+                            <small class="nag-hint">名单里角色名右边有缩略图＝有图，点缩略图看原图；空框＝无图，照常按文字生成。匹配顺序：先完整名称，再去掉作品名后按「角色名+备注」（如 安比（绝区零）改 → 安比（改））；写了备注但没有对应形态图时不使用本体图，不做模糊匹配。</small>
                         </div>
                         <small id="nag-role-duplicate-hint" class="nag-hint" style="display:none"></small>
                         <small id="nag-role-unidentified-hint" class="nag-hint" style="display:none"></small>
@@ -1442,14 +1512,20 @@ export function initNovelUI(host) {
             </div>
         </div>
         <div id="nag-role-image-preview" class="nag-role-image-preview-layer" hidden>
-            <div class="nag-role-image-preview-dialog" role="dialog" aria-modal="true" aria-label="角色图片预览">
-                <button type="button" class="nag-role-image-preview-close" aria-label="关闭预览">✕</button>
-                <img alt="">
+            <div class="nag-role-image-preview-dialog" role="dialog" aria-modal="true" aria-label="角色原图">
+                <button type="button" class="nag-role-image-preview-close" aria-label="关闭">✕</button>
+                <img alt="" decoding="async">
+                <div class="nag-role-image-preview-bar">
+                    <span class="nag-role-image-preview-caption"></span>
+                    <button type="button" class="menu_button nag-role-image-preview-toggle"></button>
+                </div>
             </div>
         </div>
     </div>`;
 
         $('#extensions_settings').append(html);
+        // Full-screen viewer lives on <body> so panel transforms/overflow cannot confine it.
+        $('#nag-role-image-preview').appendTo(document.body);
         bindEvents();
         syncUI();
         applyPanelStates();
@@ -1611,21 +1687,18 @@ export function initNovelUI(host) {
             void importRoleImageFile(this.files?.[0]);
         });
         $('#nag-btn-role-image-clear').on('click', clearRoleImages);
-        $('#nag-role-results').on('change', '.nag-role-image-disabled', function () {
-            if (settings.isRunning || fileOperation) return updateUI();
-            const index = Number(this.dataset.index);
-            const name = (settings.roleBatch?.names || parseRoleNames(settings.roleNames))[index];
-            if (!name) return;
-            settings.roleImageLibrary = setRoleImageDisabled(name, this.checked, settings.roleImageLibrary);
+        $('#nag-role-image-preview').on('click', '.nag-role-image-preview-toggle', function () {
+            if (settings.isRunning || fileOperation || previewName == null) return;
+            const disabled = !isRoleImageDisabled(previewName, settings.roleImageLibrary);
+            settings.roleImageLibrary = setRoleImageDisabled(previewName, disabled, settings.roleImageLibrary);
             saveSettings();
             updateUI();
         });
-        $('#nag-role-results').on('click', '.nag-role-image-preview', function () {
+        $('#nag-role-results').on('click', '.nag-role-thumb[data-index]', function () {
             showRoleImagePreview(Number(this.dataset.index));
         });
         $('#nag-role-image-preview').on('click', function (event) {
-            if (event.target === this || event.target.closest('.nag-role-image-preview-close'))
-                closeRoleImagePreview();
+            if (event.target === this || event.target.closest('.nag-role-image-preview-close')) closeRoleImagePreview();
         });
         $(document).on('keydown.nagRoleImagePreview', (event) => {
             if (event.key === 'Escape') closeRoleImagePreview();
@@ -2056,6 +2129,7 @@ export function initNovelUI(host) {
             disposed = true;
             cleanupHelp?.();
             closeRoleImagePreview();
+            $('#nag-role-image-preview').remove();
             $(document).off('keydown.nagRoleImagePreview');
             resultIsolation?.dispose();
             roleSelection?.dispose();

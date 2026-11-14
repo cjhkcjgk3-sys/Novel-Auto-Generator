@@ -46,12 +46,7 @@ export function createSillyTavernHost({
         const dataUrl = await roleImageStorage.getBase64Async(blob);
         const separator = dataUrl.indexOf(',');
         if (separator < 0) throw new Error('酒馆无法读取图片文件');
-        return roleImageStorage.saveBase64AsFile(
-            dataUrl.slice(separator + 1),
-            ROLE_IMAGE_FOLDER,
-            fileName,
-            extension,
-        );
+        return roleImageStorage.saveBase64AsFile(dataUrl.slice(separator + 1), ROLE_IMAGE_FOLDER, fileName, extension);
     }
     async function loadRoleImageZip() {
         if (!globalThis.JSZip?.loadAsync) await import('/lib/jszip.min.js');
