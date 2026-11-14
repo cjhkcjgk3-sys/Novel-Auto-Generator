@@ -138,7 +138,8 @@
 .nag-setting-item input[type='text'],
 .nag-setting-item input[type='number'],
 .nag-setting-item textarea,
-.nag-setting-item select {
+.nag-setting-item select,
+.nag-role-checklist input[type='search'] {
     width: 100%;
     padding: 8px 10px;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -150,6 +151,7 @@
 }
 
 .nag-setting-item input:focus,
+.nag-role-checklist input[type='search']:focus,
 .nag-setting-item textarea:focus,
 .nag-setting-item select:focus {
     outline: none;
@@ -789,7 +791,8 @@
 /* 从清单添加到名单：手机上整行可点，列表限高滚动 */
 .nag-role-checklist {
     margin: 6px 0;
-    padding: 6px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 6px;
     background: rgba(0, 0, 0, 0.15);
 }
@@ -799,9 +802,13 @@
 }
 
 .nag-role-checklist input[type='search'] {
-    box-sizing: border-box;
-    width: 100%;
-    margin: 0 0 4px;
+    margin: 0 0 6px;
+}
+
+.nag-role-image-library-controls > small,
+.nag-role-checklist > small {
+    display: block;
+    margin: 4px 0;
 }
 
 .nag-role-checklist-actions {
@@ -809,6 +816,8 @@
 }
 
 .nag-role-checklist-list {
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.15);
     max-height: min(50vh, 360px);
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -820,9 +829,18 @@
     align-items: center;
     gap: 8px;
     min-height: 36px;
-    padding: 2px 6px;
+    padding: 4px 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 13px;
     cursor: pointer;
+}
+
+.nag-role-checklist-row:last-child {
+    border-bottom: none;
+}
+
+.nag-role-checklist-row:hover {
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .nag-role-checklist-row input {
@@ -830,6 +848,8 @@
     width: 18px;
     height: 18px;
     margin: 0;
+    cursor: pointer;
+    accent-color: #8bc34a;
 }
 
 .nag-role-checklist-name {
@@ -837,20 +857,32 @@
     overflow-wrap: anywhere;
 }
 
+/* 小标签沿用状态徽章的配色：灰＝无图，绿＝有图 */
 .nag-role-checklist-tag {
     flex: none;
-    font-size: 0.8em;
-    opacity: 0.75;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: rgba(150, 150, 150, 0.2);
+    color: #aaa;
+    font-size: 11px;
 }
 
 .nag-role-checklist-row.has-image .nag-role-checklist-tag {
-    color: #6cc070;
-    opacity: 1;
+    background: rgba(139, 195, 74, 0.2);
+    color: #8bc34a;
 }
 
 .nag-role-checklist-row.is-in-roster {
     cursor: default;
     opacity: 0.5;
+}
+
+.nag-role-checklist-row.is-in-roster:hover {
+    background: none;
+}
+
+.nag-role-checklist-row.is-in-roster input {
+    cursor: default;
 }
 
 .nag-role-checklist-skins {
@@ -860,7 +892,10 @@
 .nag-role-checklist-skins > summary {
     min-height: 32px;
     line-height: 32px;
+    font-size: 13px;
+    font-weight: bold;
     cursor: pointer;
+    user-select: none;
 }
 
 /* One fixed-size slot at the right of each row: thumbnail = has image, empty dashed box = no image. */
@@ -875,9 +910,9 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
-    border: 1px solid var(--SmartThemeBorderColor, rgb(128 128 128 / 50%));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.5));
     border-radius: 6px;
-    background: rgb(128 128 128 / 15%);
+    background: rgba(0, 0, 0, 0.2);
     cursor: pointer;
 }
 
@@ -890,17 +925,17 @@
     pointer-events: none;
 }
 
+/* 中性灰虚线：酒馆默认边框色是半透明黑，在深色主题上看不见 */
 .nag-role-thumb.is-empty {
-    border-style: dashed;
+    border: 1px dashed rgba(150, 150, 150, 0.8);
     background: transparent;
     cursor: help;
-    opacity: 0.55;
     font-size: 0.9em;
 }
 
 .nag-role-thumb.is-ambiguous {
-    border-color: #d9a13b;
-    color: #d9a13b;
+    border-color: #ffc107;
+    color: #ffc107;
     opacity: 0.9;
 }
 
@@ -927,7 +962,7 @@
     align-items: center;
     justify-content: center;
     padding: 12px;
-    background: rgb(0 0 0 / 85%);
+    background: rgba(0, 0, 0, 0.85);
 }
 
 .nag-role-image-preview-layer[hidden] {
@@ -956,17 +991,30 @@
     opacity: 0.5;
 }
 
+/* 底部信息条与关闭按钮沿用插件弹窗（.nag-modal）的底色、边框和关闭按钮样式 */
 .nag-role-image-preview-bar {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
     gap: 8px;
-    color: #fff;
+    max-width: 96vw;
+    padding: 6px 10px;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor, #1e1e2e);
+    color: var(--SmartThemeBodyColor, #fff);
+    font-size: 13px;
+}
+
+.nag-role-image-preview-caption {
+    overflow-wrap: anywhere;
 }
 
 .nag-role-image-preview-bar .menu_button {
     margin: 0;
+    padding: 6px 10px;
+    font-size: 12px;
 }
 
 .nag-role-image-preview-close {
@@ -974,13 +1022,23 @@
     z-index: 1;
     top: 0;
     right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 36px;
     height: 36px;
-    border: 0;
-    border-radius: 50%;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 6px;
     color: #fff;
-    background: rgb(40 40 40 / 85%);
+    background: var(--SmartThemeBlurTintColor, #1e1e2e);
+    font-size: 16px;
     cursor: pointer;
+    transition: all 0.2s;
+}
+
+.nag-role-image-preview-close:hover {
+    background: rgba(255, 100, 100, 0.3);
+    color: #ff6b6b;
 }
 
 .nag-role-correction-actions {
