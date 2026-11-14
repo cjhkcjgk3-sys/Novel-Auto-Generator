@@ -104,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.11';
+    const pluginVersion = '1.15.12';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1412,13 +1412,17 @@ export function initNovelUI(host) {
                   const manual = item.manualStatus ? '（手动）' : '';
                   const archivedMark =
                       item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
+                  // 失败原因以前只存在数据里、界面上看不到，用户只能看到一个 ❌
+                  const failureMark = item.error
+                      ? ` <span class="nag-role-failure" data-index="${index}" title="${escapeAttribute(item.error)}">⚠</span>`
+                      : '';
                   const controls =
                       roleCorrection && item.id
                           ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`
                           : '';
                   return {
                       key: `${index}:${name}`,
-                      main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}`,
+                      main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}${failureMark}`,
                       controls,
                       slot: roleImageSlot(name, index, imageLibrary),
                   };
@@ -1866,6 +1870,10 @@ export function initNovelUI(host) {
             archiveRowsPage = Math.max(0, archiveRowsPage + (this.id.endsWith('-prev') ? -1 : 1));
             updateUI();
             $('#nag-archive-list').scrollTop(0);
+        });
+        $('#nag-role-results').on('click', '.nag-role-failure', function () {
+            const item = settings.roleBatch?.items?.[Number(this.dataset.index)];
+            toastr.warning(item?.error || '这一项没有记录失败原因', undefined, { timeOut: 8000 });
         });
         $('#nag-role-results').on('click', '.nag-role-status-set', async function () {
             if (settings.isRunning || fileOperation) return;

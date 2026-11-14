@@ -414,6 +414,25 @@ it('retains a failed result when an old complete receipt has text that fails the
     expect(batch.items[0].failed).toBe(true);
 });
 
+it('adopts a result whose receipt was marked invalid once the text passes validation', async () => {
+    const { host, context } = batchSetup();
+    const valid = '这是一段完整的角色卡正文，已经闭合。';
+    Object.assign(context.chat[2], {
+        mes: valid,
+        swipes: [valid],
+        swipe_info: [{ extra: { nag_role_batch: { taskId: 'task', itemId: 'role', status: 'invalid' } } }],
+    });
+    const batch = {
+        ...host.prepareRoleBatch(),
+        identity: host.snapshot().identity,
+        id: 'task',
+        items: [{ id: 'role', name: '角色' }],
+    };
+    await host.reconcileRoleBatch(batch, { minLength: 5 });
+    expect(batch.items[0]).toMatchObject({ processed: true, failed: false, swipe: 0 });
+    expect(context.chat[2].swipe_info[0].extra.nag_role_batch.status).toBe('complete');
+});
+
 it('does not persist an invalid nonempty generation as a complete result', async () => {
     const { host, context } = batchSetup(false);
     const invalid = '<card>有正文但没有闭合的角色卡。';

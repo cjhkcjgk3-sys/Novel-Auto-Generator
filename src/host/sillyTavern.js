@@ -170,17 +170,16 @@ export function createSillyTavernHost({
         for (const item of [...batch.items, ...(batch.history || [])]) {
             const pendingAttempt =
                 batch.pending && batch.dispatch?.itemId === item.id ? batch.dispatch.attemptId : null;
+            // 回执里的 status 是「生成那一刻」的快照：当时判成截断（invalid）或流被中断（partial），
+            // 卡片后来补完、或者判定规则调整过，就永远算不成完成，界面上一直显示没做。
+            // 这里以正文为准重新校验，通过就认；pending（请求还没回来）仍然不算，避免把上一页正文当结果。
+            const recoverableStatus = new Set(['invalid', 'partial']);
             const matching = (text, swipe) => {
                 const receipt = reply?.swipe_info?.[swipe]?.extra?.nag_role_batch;
-                return (
-                    receipt?.taskId === batch.id &&
-                    receipt.itemId === item.id &&
-                    !receipt.previewId &&
-                    receipt.status === 'complete' &&
-                    !!text?.trim() &&
-                    text.trim() !== '...' &&
-                    (receipt.origin === 'worldbook' || !isRoleCardTruncated(text, validationOptions))
-                );
+                if (receipt?.taskId !== batch.id || receipt.itemId !== item.id || receipt.previewId) return false;
+                if (!text?.trim() || text.trim() === '...') return false;
+                if (receipt.origin !== 'worldbook' && isRoleCardTruncated(text, validationOptions)) return false;
+                return receipt.status === 'complete' || recoverableStatus.has(receipt.status);
             };
             const completedAttempt = pendingAttempt
                 ? swipes.findLastIndex(
@@ -211,6 +210,7 @@ export function createSillyTavernHost({
                         processing: false,
                         processed: true,
                         failed: false,
+                        error: null,
                         swipe: bound >= 0 ? bound : legacy ? item.swipe : null,
                     },
                 ]);
@@ -244,6 +244,16 @@ export function createSillyTavernHost({
                 changed = true;
             }
             if (index >= 0) {
+                const accepted = reply.swipe_info?.[index]?.extra?.nag_role_batch;
+                if (accepted && accepted.status !== 'complete') {
+                    // 正文重新校验通过了，把回执升级成 complete，之后各处判断都一致
+                    accepted.status = 'complete';
+                    changed = true;
+                    if ((reply.swipe_id ?? 0) === index) {
+                        reply.extra ??= {};
+                        reply.extra.nag_role_batch = accepted;
+                    }
+                }
                 if (!item.processed || item.failed || item.legacy) changed = true;
                 updates.push([
                     item,
@@ -251,6 +261,7 @@ export function createSillyTavernHost({
                         processing: false,
                         processed: true,
                         failed: false,
+                        error: null,
                         swipe: index,
                         legacy: false,
                         ...(completedAttempt >= 0 ? { manualStatus: null } : {}),

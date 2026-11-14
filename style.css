@@ -1266,3 +1266,9 @@
     padding: 0 8px;
     font-size: 0.85em;
 }
+
+/* 失败原因标记：点一下用提示条显示完整错误 */
+.nag-role-failure {
+    color: #e74c3c;
+    cursor: pointer;
+}
