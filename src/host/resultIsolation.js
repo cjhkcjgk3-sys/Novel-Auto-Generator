@@ -1,14 +1,17 @@
 import { clearRoleResultHashes, verifyRoleResults } from './roleResultIntegrity.js';
 
 export const ROLE_RESULT_INTERCEPTOR = 'NovelGen_isolateRoleResult';
+export const ROLE_BATCH_REQUEST = Symbol.for('novel-auto-generator.role-batch-request');
 
-/** Keep native swipe rendering; isolate only request copies and verify stored result bodies. */
+/** Keep native swipe rendering, add marked role images to request copies, and verify stored results. */
 export function createRoleResultIsolation({
     getContext,
     getChat,
     snapshot,
     getDocument,
     getBatch,
+    getRoleImage = () => null,
+    mediaApi = null,
     onError = () => {},
     restoreLegacyVisibility = async () => {},
 }) {
@@ -83,6 +86,41 @@ export function createRoleResultIsolation({
     }
 
     async function intercept(messages, _size, abort) {
+        const request = messages.findLast((message) => message.is_user && message.extra?.[ROLE_BATCH_REQUEST]);
+        if (request) {
+            try {
+                const image = await getRoleImage(request.extra[ROLE_BATCH_REQUEST]);
+                if (image?.path) {
+                    if (!mediaApi) throw new Error('当前酒馆没有可用的媒体请求接口');
+                    const originalExtra = request.extra || {};
+                    const originalMedia = Array.isArray(originalExtra.media) ? originalExtra.media : [];
+                    const displayMedia =
+                        mediaApi.getMediaDisplay(request) === mediaApi.MEDIA_DISPLAY.GALLERY
+                            ? [originalMedia[mediaApi.getMediaIndex(request)]].filter(Boolean)
+                            : [...originalMedia];
+                    const requestExtra = { ...originalExtra };
+                    delete requestExtra[ROLE_BATCH_REQUEST];
+                    request.extra = {
+                        ...requestExtra,
+                        media: [
+                            ...displayMedia,
+                            {
+                                url: image.path,
+                                type: mediaApi.MEDIA_TYPE.IMAGE,
+                                title: image.fileName || image.name || '角色图片',
+                                source: mediaApi.MEDIA_SOURCE.UPLOAD,
+                            },
+                        ],
+                        media_display: mediaApi.MEDIA_DISPLAY.LIST,
+                        media_index: displayMedia.length,
+                    };
+                }
+            } catch (error) {
+                // Image preparation is optional: keep the existing text-only generation path.
+                console.warn('[NovelGen] Could not attach the matched role image; continuing without it.', error);
+            }
+        }
+
         const current = target();
         if (!current) return;
         try {

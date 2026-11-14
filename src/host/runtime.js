@@ -1,10 +1,24 @@
 import * as tavern from '/script.js';
 import * as tavernLib from '/lib.js';
 import { extension_settings } from '/scripts/extensions.js';
+import * as tavernUtils from '/scripts/utils.js';
+import { MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE } from '/scripts/constants.js';
 import { createSillyTavernHost } from './sillyTavern.js';
 export const host = createSillyTavernHost({
     extensionSettings: extension_settings,
     saveSettings: tavern.saveSettingsDebounced,
+    mediaApi: {
+        getMediaDisplay: tavern.getMediaDisplay,
+        getMediaIndex: tavern.getMediaIndex,
+        MEDIA_DISPLAY,
+        MEDIA_SOURCE,
+        MEDIA_TYPE,
+    },
+    roleImageStorage: {
+        getBase64Async: tavernUtils.getBase64Async,
+        saveBase64AsFile: tavernUtils.saveBase64AsFile,
+        getRequestHeaders: tavern.getRequestHeaders,
+    },
     parseYaml:
         typeof tavernLib.yaml?.parseDocument === 'function'
             ? (text) => {

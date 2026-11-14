@@ -1,6 +1,6 @@
 import { abortableDelay } from '../../txtToWorldbook/core/requestPolicy.js';
 import { isRoleCardTruncated } from '../novel/tagFilters.js';
-import { createRoleResultIsolation } from './resultIsolation.js';
+import { createRoleResultIsolation, ROLE_BATCH_REQUEST } from './resultIsolation.js';
 import { hashRoleResult, RESULT_HASH_KEY } from './roleResultIntegrity.js';
 import {
     ROLE_ENTRY_KEY,
@@ -12,6 +12,7 @@ import {
 import { countUnidentifiedRolePages, roleComplete, unidentifiedRolePageSignature } from '../novel/roleBatchState.js';
 import { selectedRole } from './roleSelection.js';
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
+import { ROLE_IMAGE_FOLDER } from '../novel/roleImageLibrary.js';
 
 export function getSillyTavernContext() {
     return globalThis.SillyTavern?.getContext?.() ?? globalThis.getContext?.() ?? null;
@@ -26,6 +27,8 @@ export function createSillyTavernHost({
     jquery = (...args) => globalThis.jQuery(...args),
     extensionSettings = {},
     saveSettings = () => {},
+    mediaApi = null,
+    roleImageStorage = null,
     swipeReply = null,
     syncMesToSwipe = null,
     syncSwipeToMes = null,
@@ -34,6 +37,37 @@ export function createSillyTavernHost({
 } = {}) {
     let roleGeneration = null;
     let roleIsolation = null;
+    async function uploadRoleImage(blob, fileName, extension) {
+        if (
+            typeof roleImageStorage?.getBase64Async !== 'function' ||
+            typeof roleImageStorage?.saveBase64AsFile !== 'function'
+        )
+            throw new Error('当前酒馆没有可用的图片保存接口');
+        const dataUrl = await roleImageStorage.getBase64Async(blob);
+        const separator = dataUrl.indexOf(',');
+        if (separator < 0) throw new Error('酒馆无法读取图片文件');
+        return roleImageStorage.saveBase64AsFile(
+            dataUrl.slice(separator + 1),
+            ROLE_IMAGE_FOLDER,
+            fileName,
+            extension,
+        );
+    }
+    async function loadRoleImageZip() {
+        if (!globalThis.JSZip?.loadAsync) await import('/lib/jszip.min.js');
+        return globalThis.JSZip;
+    }
+    async function deleteRoleImage(path) {
+        if (typeof roleImageStorage?.getRequestHeaders !== 'function')
+            throw new Error('当前酒馆没有可用的图片删除接口');
+        const response = await fetch('/api/images/delete', {
+            method: 'POST',
+            headers: roleImageStorage.getRequestHeaders(),
+            body: JSON.stringify({ path }),
+        });
+        if (response.status === 404) return;
+        if (!response.ok) throw new Error('酒馆未能删除图片');
+    }
     function getChat() {
         try {
             const chat = getContext()?.chat;
@@ -951,6 +985,13 @@ export function createSillyTavernHost({
         if (stopEvent) context.eventSource?.on(stopEvent, onUserStop);
         if (startEvent) context.eventSource?.on(startEvent, onStarted);
         if (receivedEvent) context.eventSource?.on(receivedEvent, onReceived);
+        const requestMarker = operation ? { ...operation } : null;
+        const originalPromptExtra = prompt.extra;
+        const createdPromptExtra = !originalPromptExtra || typeof originalPromptExtra !== 'object';
+        if (requestMarker) {
+            prompt.extra ??= {};
+            prompt.extra[ROLE_BATCH_REQUEST] = requestMarker;
+        }
         try {
             // regenerate on a user tail neither adds a user message nor consumes the input draft.
             // swipe excludes the result floor while retaining presets, card fields and worldbook rules.
@@ -1059,6 +1100,13 @@ export function createSillyTavernHost({
             if (receivedEvent) context.eventSource?.removeListener(receivedEvent, onReceived);
             // Let core finish its swipe cleanup before reset can dispatch another generation.
             if (roleGeneration) await Promise.race([roleGeneration.catch(() => {}), abortableDelay(1000)]);
+            if (requestMarker && prompt.extra?.[ROLE_BATCH_REQUEST] === requestMarker) {
+                delete prompt.extra[ROLE_BATCH_REQUEST];
+                if (createdPromptExtra && Reflect.ownKeys(prompt.extra).length === 0) {
+                    if (originalPromptExtra == null) delete prompt.extra;
+                    else prompt.extra = originalPromptExtra;
+                }
+            }
         }
     }
     return {
@@ -1091,7 +1139,14 @@ export function createSillyTavernHost({
         },
         createRoleResultIsolation(options) {
             roleIsolation?.dispose();
-            roleIsolation = createRoleResultIsolation({ getContext, getChat, snapshot, getDocument, ...options });
+            roleIsolation = createRoleResultIsolation({
+                getContext,
+                getChat,
+                snapshot,
+                getDocument,
+                mediaApi,
+                ...options,
+            });
             return roleIsolation;
         },
         snapshot,
@@ -1115,6 +1170,9 @@ export function createSillyTavernHost({
             return confirmed;
         },
         generateRoleReply,
+        uploadRoleImage,
+        loadRoleImageZip,
+        deleteRoleImage,
         restoreRoleTemplate,
         reconcileRoleBatch,
         importRoleResults,

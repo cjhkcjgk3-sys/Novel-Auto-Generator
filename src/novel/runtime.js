@@ -16,6 +16,15 @@ import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
 import { createErrorRecord } from '../../txtToWorldbook/core/logger.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
+import {
+    clearRoleImageLibrary,
+    createRoleImageIndex,
+    findRoleImageMatch,
+    getRoleImageForRequest,
+    importRoleImageZip,
+    isRoleImageDisabled,
+    setRoleImageDisabled,
+} from './roleImageLibrary.js';
 
 let instance = null;
 export function initNovelUI(host) {
@@ -34,6 +43,7 @@ export function initNovelUI(host) {
         generationMode: 'novel',
         roleNames: '',
         roleBatch: null,
+        roleImageLibrary: null,
         // 已完成角色名录（全局共用）：生成名单里出现这个名字时自动跳过，避免重复生成。
         roleArchive: [],
         errorLog: [],
@@ -91,7 +101,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.12.5';
+    const pluginVersion = '1.13.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -126,6 +136,13 @@ export function initNovelUI(host) {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML.replace(/\n/g, '<br>');
+    }
+
+    function escapeAttribute(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (character) => {
+            const escaped = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+            return escaped[character];
+        });
     }
 
     // ============================================
@@ -619,6 +636,22 @@ export function initNovelUI(host) {
     resultIsolation = host.createRoleResultIsolation({
         getBatch: () =>
             settings.generationMode === 'role-batch' && settings.isolateRoleResult ? settings.roleBatch : null,
+        getRoleImage: (request) => {
+            const batch = settings.roleBatch;
+            if (
+                settings.generationMode !== 'role-batch' ||
+                !batch ||
+                host.snapshot().identity !== batch.identity ||
+                batch.id !== request?.taskId ||
+                batch.dispatch?.itemId !== request.itemId ||
+                batch.dispatch?.attemptId !== request.attemptId
+            )
+                return null;
+            const item = [...(batch.items || []), ...(batch.history || [])].find(
+                (candidate) => candidate.id === request.itemId,
+            );
+            return item ? getRoleImageForRequest(item.name, settings.roleImageLibrary) : null;
+        },
         restoreLegacyVisibility: () => host.restoreLegacyVisibility(),
         onError: (error, details) => {
             recordError(error, details);
@@ -823,6 +856,68 @@ export function initNovelUI(host) {
         }
     }
 
+    async function importRoleImageFile(file) {
+        if (!file || settings.isRunning || fileOperation) return;
+        if (settings.roleImageLibrary?.items?.length) {
+            $('#nag-role-image-file').val('');
+            return toastr.info('请先清空当前作品图片库，再导入下一个作品');
+        }
+        fileOperation = true;
+        updateUI();
+        try {
+            const result = await importRoleImageZip(file, host);
+            settings.roleImageLibrary = result.library;
+            saveSettings();
+            toastr.success(
+                `已导入「${result.library.workName}」${result.imported} 张角色图片${result.skipped ? `，跳过 ${result.skipped} 项` : ''}`,
+            );
+        } catch (error) {
+            toastr.warning(error.message);
+        } finally {
+            fileOperation = false;
+            $('#nag-role-image-file').val('');
+            updateUI();
+        }
+    }
+
+    async function clearRoleImages() {
+        if (settings.isRunning || fileOperation) return;
+        if (!settings.roleImageLibrary?.items?.length) return toastr.info('图片库已经为空');
+        fileOperation = true;
+        updateUI();
+        try {
+            const result = await clearRoleImageLibrary(settings.roleImageLibrary, host);
+            settings.roleImageLibrary = result.library;
+            saveSettings();
+            toastr.info(
+                result.failed
+                    ? `已删除 ${result.deleted} 张，${result.failed} 张未能删除并保留在图片库中`
+                    : `已清空图片库，共删除 ${result.deleted} 张`,
+            );
+        } catch (error) {
+            toastr.warning(error.message);
+        } finally {
+            fileOperation = false;
+            updateUI();
+        }
+    }
+
+    function closeRoleImagePreview() {
+        const preview = document.getElementById('nag-role-image-preview');
+        if (preview) preview.hidden = true;
+    }
+
+    function showRoleImagePreview(index) {
+        const name = (settings.roleBatch?.names || parseRoleNames(settings.roleNames))[index];
+        const image = name ? findRoleImageMatch(name, settings.roleImageLibrary) : null;
+        const preview = document.getElementById('nag-role-image-preview');
+        const imageElement = preview?.querySelector('img');
+        if (!image || !preview || !imageElement) return;
+        imageElement.src = image.path;
+        imageElement.alt = name;
+        preview.hidden = false;
+    }
+
     // ============================================
     // 设置 & UI
     // ============================================
@@ -903,6 +998,14 @@ export function initNovelUI(host) {
         $('#nag-set-total').prop('readOnly', batchMode);
         if (batchMode) $('#nag-set-total').val(roleNames.length);
         $('#nag-role-name-hint, #nag-btn-import-worldbook').toggle(batchMode);
+        const imageLibrary = settings.roleImageLibrary;
+        const imageCount = Array.isArray(imageLibrary?.items) ? imageLibrary.items.length : 0;
+        $('#nag-role-image-library-controls').toggle(batchMode);
+        $('#nag-role-image-library-summary').text(
+            imageCount ? `${imageLibrary.workName}：${imageCount} 张图片` : '尚未导入作品图片',
+        );
+        const roleImageIndex = createRoleImageIndex(imageLibrary);
+        $('#nag-btn-role-image-import, #nag-btn-role-image-clear, #nag-role-image-file').prop('disabled', busy);
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
         const archiveNameSet = new Set(archiveNames);
         renderRoleArchive(archiveNames);
@@ -959,17 +1062,29 @@ export function initNovelUI(host) {
                     ? roleNames
                           .map((name, index) => {
                               const item = batch?.items[index] || {};
+                              const image = findRoleImageMatch(name, imageLibrary, roleImageIndex);
                               const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
                               const manual = item.manualStatus ? '（手动）' : '';
                               const archivedMark =
                                   item.archived || (!roleComplete(item) && archiveNameSet.has(String(name).trim()))
                                       ? '（名录）'
                                       : '';
+                              const imageControls = image
+                                  ? `<span class="nag-role-image-controls">
+                                        <button type="button" class="nag-role-image-preview" data-index="${index}" title="预览角色图片" aria-label="预览 ${escapeAttribute(name)} 的角色图片">
+                                            <img src="${escapeAttribute(image.path)}" alt="" loading="lazy" decoding="async">
+                                        </button>
+                                        <label class="nag-role-image-toggle">
+                                            <input type="checkbox" class="nag-role-image-disabled" data-index="${index}" ${isRoleImageDisabled(name, imageLibrary) ? 'checked' : ''} ${busy ? 'disabled' : ''}>
+                                            <span>不用图</span>
+                                        </label>
+                                    </span>`
+                                  : '';
                               const controls =
                                   roleCorrection && item.id && !busy
                                       ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete" ${busy ? 'disabled' : ''}>✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed" ${busy ? 'disabled' : ''}>✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto" ${busy ? 'disabled' : ''}>自动</button></span>`
                                       : '';
-                              return `<div class="ttw-memory-item nag-role-status-row"><span>${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}</span>${controls}</div>`;
+                              return `<div class="ttw-memory-item nag-role-status-row"><div class="nag-role-status-main"><span class="nag-role-status-name">${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}</span>${imageControls}</div>${controls}</div>`;
                           })
                           .join('')
                     : '',
@@ -1086,6 +1201,15 @@ export function initNovelUI(host) {
                         <div class="nag-setting-item"><label id="nag-total-label">目标章节</label><input type="number" id="nag-set-total" min="1"></div>
                         <div class="nag-setting-item"><label id="nag-prompt-label">提示词</label><textarea id="nag-set-prompt" rows="4"></textarea></div>
                         <small id="nag-role-name-hint" class="nag-hint" style="display:none">每行一个完整角色名。同名只处理一次，已有成功结果自动跳过。修改写卡提示词：先停止任务，在聊天中编辑并保存原提示词楼层，保留 [[角色名]]；继续或重生成时自动使用新提示词。</small>
+                        <div id="nag-role-image-library-controls" class="nag-role-image-library-controls" style="display:none">
+                            <div class="nag-btn-row">
+                                <button type="button" id="nag-btn-role-image-import" class="menu_button">📥 导入作品 ZIP</button>
+                                <button type="button" id="nag-btn-role-image-clear" class="menu_button">🗑️ 清空图片库</button>
+                                <input id="nag-role-image-file" type="file" accept=".zip,application/zip" hidden>
+                            </div>
+                            <small id="nag-role-image-library-summary" class="nag-hint">尚未导入作品图片</small>
+                            <small class="nag-hint">自动精确匹配角色全名，忽略标点和作品名前后；没有匹配图时照常生成。</small>
+                        </div>
                         <small id="nag-role-duplicate-hint" class="nag-hint" style="display:none"></small>
                         <small id="nag-role-unidentified-hint" class="nag-hint" style="display:none"></small>
                         <div class="nag-checkbox-group nag-result-isolation-setting">
@@ -1317,6 +1441,12 @@ export function initNovelUI(host) {
 
             </div>
         </div>
+        <div id="nag-role-image-preview" class="nag-role-image-preview-layer" hidden>
+            <div class="nag-role-image-preview-dialog" role="dialog" aria-modal="true" aria-label="角色图片预览">
+                <button type="button" class="nag-role-image-preview-close" aria-label="关闭预览">✕</button>
+                <img alt="">
+            </div>
+        </div>
     </div>`;
 
         $('#extensions_settings').append(html);
@@ -1473,6 +1603,32 @@ export function initNovelUI(host) {
         });
         $('#nag-role-worldbook-file').on('change', function () {
             void importWorldbookFile(this.files?.[0]);
+        });
+        $('#nag-btn-role-image-import').on('click', () => {
+            if (!settings.isRunning && !fileOperation) $('#nag-role-image-file').trigger('click');
+        });
+        $('#nag-role-image-file').on('change', function () {
+            void importRoleImageFile(this.files?.[0]);
+        });
+        $('#nag-btn-role-image-clear').on('click', clearRoleImages);
+        $('#nag-role-results').on('change', '.nag-role-image-disabled', function () {
+            if (settings.isRunning || fileOperation) return updateUI();
+            const index = Number(this.dataset.index);
+            const name = (settings.roleBatch?.names || parseRoleNames(settings.roleNames))[index];
+            if (!name) return;
+            settings.roleImageLibrary = setRoleImageDisabled(name, this.checked, settings.roleImageLibrary);
+            saveSettings();
+            updateUI();
+        });
+        $('#nag-role-results').on('click', '.nag-role-image-preview', function () {
+            showRoleImagePreview(Number(this.dataset.index));
+        });
+        $('#nag-role-image-preview').on('click', function (event) {
+            if (event.target === this || event.target.closest('.nag-role-image-preview-close'))
+                closeRoleImagePreview();
+        });
+        $(document).on('keydown.nagRoleImagePreview', (event) => {
+            if (event.key === 'Escape') closeRoleImagePreview();
         });
         $('#nag-btn-refresh-floors').on('click', () => $('#nag-total-floors').text(getTotalFloors()));
         $('#nag-btn-refresh-preview').on('click', refreshPreview);
@@ -1899,6 +2055,8 @@ export function initNovelUI(host) {
             clearInterval(refreshTimer);
             disposed = true;
             cleanupHelp?.();
+            closeRoleImagePreview();
+            $(document).off('keydown.nagRoleImagePreview');
             resultIsolation?.dispose();
             roleSelection?.dispose();
             bufferedStream.dispose();
