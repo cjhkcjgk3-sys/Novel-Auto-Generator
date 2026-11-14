@@ -104,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.6';
+    const pluginVersion = '1.15.7';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -675,6 +675,7 @@ export function initNovelUI(host) {
 
     async function startGeneration() {
         if (fileOperation) return;
+        commitRosterInput();
         try {
             if (settings.bufferModelStream) await bufferedStream.probe();
             await resultIsolation.prepare();
@@ -1215,8 +1216,52 @@ export function initNovelUI(host) {
         resultIsolation?.refresh();
     }
 
+    // 设置里带着整份图片库，序列化一次不便宜；酒馆的 saveSettings 又是同步序列化 + 立刻发请求。
+    // UI 上连续的小改动（打字、勾选、纠错）先合并，几百毫秒内只写一次。
+    const SETTINGS_SAVE_DELAY = 400;
+    let settingsSaveTimer = null;
+
     function saveSettings() {
+        if (settingsSaveTimer !== null) clearTimeout(settingsSaveTimer);
+        settingsSaveTimer = setTimeout(() => {
+            settingsSaveTimer = null;
+            host.writeSettings(extensionName, settings);
+        }, SETTINGS_SAVE_DELAY);
+    }
+
+    /** 立刻落盘：开始任务、卸载、页面离开时用，别丢掉最后的改动。 */
+    function flushSettings() {
+        if (settingsSaveTimer === null) return;
+        clearTimeout(settingsSaveTimer);
+        settingsSaveTimer = null;
         host.writeSettings(extensionName, settings);
+    }
+
+    // 名单输入：打字时只更新内存，停下来一会儿或失焦时再统一保存 + 重绘。
+    // 上百个角色时，逐键重绘整份名单会把输入框拖到几秒后才回显。
+    const ROSTER_COMMIT_DELAY = 300;
+    let rosterCommitTimer = null;
+    let rosterDirty = false;
+
+    function scheduleRosterCommit() {
+        rosterDirty = true;
+        if (rosterCommitTimer !== null) clearTimeout(rosterCommitTimer);
+        rosterCommitTimer = setTimeout(commitRosterInput, ROSTER_COMMIT_DELAY);
+    }
+
+    function commitRosterInput() {
+        if (rosterCommitTimer !== null) {
+            clearTimeout(rosterCommitTimer);
+            rosterCommitTimer = null;
+        }
+        if (!rosterDirty) return;
+        rosterDirty = false;
+        if (settings.generationMode !== 'role-batch') return;
+        const input = document.getElementById('nag-set-prompt');
+        if (input) settings.roleNames = String(input.value ?? '');
+        roleRunner.saveInput();
+        saveSettings();
+        updateUI();
     }
 
     let renderedArchiveKey = null;
@@ -1939,6 +1984,8 @@ export function initNovelUI(host) {
         });
         // Esc 在 window 捕获阶段拦下，避免同一个按键既关看图、又触发酒馆自己的处理。
         window.addEventListener('keydown', onPreviewKeydown, true);
+        // 设置保存是合并写的，页面被切走前补一次，别丢掉最后的改动。
+        $(window).on('pagehide.nagSettings', flushSettings);
         window.addEventListener('popstate', onPreviewPopState);
         $('#nag-btn-refresh-floors').on('click', () => $('#nag-total-floors').text(getTotalFloors()));
         $('#nag-btn-refresh-preview').on('click', refreshPreview);
@@ -2114,13 +2161,19 @@ export function initNovelUI(host) {
             saveSettings();
             updateUI();
         });
-        $('#nag-set-prompt').on('input change', function () {
-            if (settings.generationMode === 'role-batch') settings.roleNames = $(this).val();
-            else settings.prompt = $(this).val();
-            if (settings.generationMode === 'role-batch') roleRunner.saveInput();
+        $('#nag-set-prompt').on('input', function () {
+            if (settings.generationMode === 'role-batch') {
+                settings.roleNames = $(this).val();
+                // 打字时不要逐键落盘和重建列表：一次按键就要序列化整份设置、
+                // 重建上百行，输入框会被拖到几秒后才回显。
+                scheduleRosterCommit();
+                return;
+            }
+            settings.prompt = $(this).val();
             saveSettings();
             updateUI();
         });
+        $('#nag-set-prompt').on('change blur', () => commitRosterInput());
         $('#nag-set-prompt').on('change', function () {
             if (settings.generationMode !== 'role-batch') return;
             const duplicates = duplicateRoleNames(settings.roleNames);
@@ -2367,10 +2420,16 @@ export function initNovelUI(host) {
             cleanupHelp?.();
             // 卸载时不要触发 history.back()，否则会平白退掉一页。
             previewHistoryGuard = false;
+            if (settingsSaveTimer !== null) clearTimeout(settingsSaveTimer);
+            if (rosterCommitTimer !== null) clearTimeout(rosterCommitTimer);
+            settingsSaveTimer = null;
+            rosterCommitTimer = null;
+            flushSettings();
             closeRoleImagePreview();
             $('#nag-role-image-preview').remove();
             window.removeEventListener('keydown', onPreviewKeydown, true);
             window.removeEventListener('popstate', onPreviewPopState);
+            $(window).off('pagehide.nagSettings');
             resultIsolation?.dispose();
             roleSelection?.dispose();
             bufferedStream.dispose();
