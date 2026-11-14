@@ -542,6 +542,7 @@ txtToWorldbook/
 3. 确认模型名称正确
 4. 本地模型确保服务已启动
 5. 或改用酒馆 API 模式
+
 </details>
 
 <details>
@@ -550,6 +551,7 @@ txtToWorldbook/
 - 降低并发数（如从 3 降到 2）
 - 使用分批模式替代独立模式（请求更少）
 - API 智能重试会自动处理偶发限流，但频繁限流说明请求速度超出配额
+
 </details>
 
 ### 处理相关
@@ -561,6 +563,7 @@ txtToWorldbook/
 2. 选择独立模式（最快）
 3. 使用更快的模型（如 `gemini-2.5-flash`）
 4. 适当减小每块字数
+
 </details>
 
 <details>
@@ -571,6 +574,7 @@ txtToWorldbook/
 3. 自定义提示词，针对小说类型优化
 4. 处理后用「整理条目」优化
 5. 用「别名合并」清理重复
+
 </details>
 
 <details>
@@ -581,6 +585,7 @@ txtToWorldbook/
 - 减小每块字数
 - 关闭剧情大纲/文风配置以减少 prompt 长度
 - 开启分卷模式
+
 </details>
 
 ### 数据相关
@@ -593,6 +598,7 @@ txtToWorldbook/
 - 确认之前的处理已运行超过 60 秒（自动保存间隔）
 - 检查浏览器是否清除了 IndexedDB 数据
 - 建议长时间处理前手动「导出任务」作为备份
+
 </details>
 
 <details>
@@ -609,6 +615,7 @@ txtToWorldbook/
 2. 在 SillyTavern 中打开「世界信息」
 3. 点击导入，选择下载的文件
 4. 将世界书绑定到对应角色卡
+
 </details>
 
 ### 使用技巧

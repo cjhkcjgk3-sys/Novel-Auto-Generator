@@ -104,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.10';
+    const pluginVersion = '1.15.11';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1427,6 +1427,14 @@ export function initNovelUI(host) {
         // 只计算当前页，避免隐藏行仍重复进行名称、图片匹配和 HTML 构造。
         renderRoleRows($('#nag-role-results')[0], shownRows);
         renderPager('nag-role-rows', batchMode ? roleNames.length : 0, roleRowsPage);
+        {
+            // 「跳到当前」只在名单跨页时出现；已经在那一页就禁用
+            const total = batchMode ? roleNames.length : 0;
+            const currentIndex = Math.min(Math.max(0, batch?.index ?? 0), Math.max(0, total - 1));
+            $('#nag-role-rows-jump')
+                .prop('disabled', roleRowsPage === Math.floor(currentIndex / ROLE_ROWS_PAGE))
+                .attr('title', total ? `跳到正在生成的第 ${currentIndex + 1} 个（共 ${total} 个）` : '');
+        }
         $('#nag-role-results .nag-role-status-set').prop('disabled', busy);
         syncRoleImagePreviewToggle();
 
@@ -1585,7 +1593,7 @@ export function initNovelUI(host) {
                         </div>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
-                        <div id="nag-role-rows-pager" class="nag-btn-row" style="display:none"><button type="button" id="nag-role-rows-prev" class="menu_button">上一页</button><small id="nag-role-rows-page" class="nag-hint" aria-live="polite"></small><button type="button" id="nag-role-rows-more" class="menu_button">下一页</button></div>
+                        <div id="nag-role-rows-pager" class="nag-btn-row" style="display:none"><button type="button" id="nag-role-rows-prev" class="menu_button">上一页</button><small id="nag-role-rows-page" class="nag-hint" aria-live="polite"></small><button type="button" id="nag-role-rows-jump" class="menu_button">跳到当前</button><button type="button" id="nag-role-rows-more" class="menu_button">下一页</button></div>
                     </div>
                 </div>
 
@@ -1843,6 +1851,16 @@ export function initNovelUI(host) {
             roleRowsPage = Math.max(0, roleRowsPage + (this.id.endsWith('-prev') ? -1 : 1));
             updateUI();
             $('#nag-role-results').scrollTop(0);
+        });
+        $('#nag-role-rows-jump').on('click', () => {
+            const names = settings.roleBatch?.names || parseRoleNames(settings.roleNames);
+            if (!names.length) return;
+            const index = Math.min(names.length - 1, Math.max(0, settings.roleBatch?.index ?? 0));
+            roleRowsPage = Math.floor(index / ROLE_ROWS_PAGE);
+            updateUI();
+            // 翻到那一页后把正在生成的行滚到视野中间，省得自己找
+            const row = $(`#nag-role-results .nag-role-status-row[data-row-key^="${index}:"]`)[0];
+            row?.scrollIntoView({ block: 'center' });
         });
         $('#nag-archive-more, #nag-archive-prev').on('click', function () {
             archiveRowsPage = Math.max(0, archiveRowsPage + (this.id.endsWith('-prev') ? -1 : 1));
