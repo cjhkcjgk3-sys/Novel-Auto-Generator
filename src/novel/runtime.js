@@ -17,10 +17,13 @@ import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
 import { createErrorRecord } from '../../txtToWorldbook/core/logger.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
 import {
+    addNamesToRoster,
     clearRoleImageLibrary,
     getRoleImageForRequest,
+    hasChecklistRoles,
     importRoleImageZip,
     isRoleImageDisabled,
+    listChecklistRoles,
     matchRoleImage,
     setRoleImageDisabled,
 } from './roleImageLibrary.js';
@@ -100,7 +103,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.14.0';
+    const pluginVersion = '1.15.0';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -870,9 +873,11 @@ export function initNovelUI(host) {
                 onProgress: ({ done, total }) => summary.text(`正在逐张导入图片 ${done}/${total}…`),
             });
             settings.roleImageLibrary = result.library;
+            resetChecklistPicker();
             saveSettings();
+            const listed = result.library.checklist;
             toastr.success(
-                `已导入「${result.library.workName}」${result.imported} 张角色图片${result.skipped ? `，跳过 ${result.skipped} 项` : ''}`,
+                `已导入「${result.library.workName}」${result.imported} 张角色图片${result.skipped ? `，跳过 ${result.skipped} 项` : ''}；清单共 ${listed.roles.length} 个角色${listed.skins.length ? `、${listed.skins.length} 个皮肤` : ''}，可点「从清单添加到名单」`,
             );
         } catch (error) {
             toastr.warning(error.message);
@@ -891,6 +896,7 @@ export function initNovelUI(host) {
         try {
             const result = await clearRoleImageLibrary(settings.roleImageLibrary, host);
             settings.roleImageLibrary = result.library;
+            resetChecklistPicker();
             saveSettings();
             toastr.info(
                 result.failed
@@ -903,6 +909,108 @@ export function initNovelUI(host) {
             fileOperation = false;
             updateUI();
         }
+    }
+
+    // ============================================
+    // 从清单添加到角色名单
+    // ============================================
+
+    const checklistSelection = new Set();
+    let checklistOpen = false;
+    let checklistRenderKey = null;
+
+    function resetChecklistPicker() {
+        checklistSelection.clear();
+        checklistRenderKey = null;
+    }
+
+    function checklistRowsHtml(rows) {
+        return rows
+            .map((row) => {
+                const state = row.inRoster ? '已在名单' : row.hasImage ? '有图' : '无图';
+                const cls = row.inRoster ? 'is-in-roster' : row.hasImage ? 'has-image' : 'no-image';
+                const checked = !row.inRoster && checklistSelection.has(row.name) ? ' checked' : '';
+                return `<label class="nag-role-checklist-row ${cls}"><input type="checkbox" class="nag-role-checklist-check" value="${escapeAttribute(row.name)}"${row.inRoster ? ' disabled' : ''}${checked}><span class="nag-role-checklist-name">${escapeHtml(row.name)}</span><span class="nag-role-checklist-tag">${state}</span></label>`;
+            })
+            .join('');
+    }
+
+    function updateChecklistCount() {
+        const count = checklistSelection.size;
+        $('#nag-btn-role-checklist-add')
+            .text(`➕ 加入名单（${count}）`)
+            .prop('disabled', !count || settings.isRunning || fileOperation);
+    }
+
+    /** Re-render only when the roster, library, search or open state changed (not on the 1 s refresh). */
+    function renderChecklistPicker(force = false) {
+        const library = settings.roleImageLibrary;
+        const hasLibrary = !!library?.items?.length;
+        const available = hasLibrary && hasChecklistRoles(library);
+        $('#nag-btn-role-checklist-toggle')
+            .toggle(available)
+            .text(checklistOpen ? '📋 收起清单' : '📋 从清单添加到名单');
+        $('#nag-role-checklist-legacy').toggle(hasLibrary && !available);
+        const panel = $('#nag-role-checklist');
+        panel.prop('hidden', !(available && checklistOpen));
+        if (!available || !checklistOpen) return;
+        const query = String($('#nag-role-checklist-search').val() || '');
+        const key = [library.workName, library.items.length, query, settings.roleNames].join('\u0000');
+        if (!force && key === checklistRenderKey) return updateChecklistCount();
+        checklistRenderKey = key;
+        const view = listChecklistRoles(library, settings.roleNames, query);
+        const roster = new Set(parseRoleNames(settings.roleNames));
+        for (const name of [...checklistSelection]) if (roster.has(name)) checklistSelection.delete(name);
+        const all = [...view.roles, ...view.skins];
+        const inRoster = library.checklist.roles.concat(library.checklist.skins).filter((name) => roster.has(name));
+        $('#nag-role-checklist-summary').text(
+            `「${library.workName}」清单 ${view.total} 个名字，已在名单 ${inRoster.length} 个${query.trim() ? `；搜索到 ${all.length} 个` : ''}`,
+        );
+        $('#nag-role-checklist-roles').html(
+            view.roles.length
+                ? checklistRowsHtml(view.roles)
+                : `<small class="nag-hint">${query.trim() ? '没有搜索到角色' : '清单里没有角色'}</small>`,
+        );
+        $('#nag-role-checklist-skins-wrap').toggle(library.checklist.skins.length > 0);
+        $('#nag-role-checklist-skins-count').text(
+            query.trim() ? `${view.skins.length}/${library.checklist.skins.length}` : library.checklist.skins.length,
+        );
+        $('#nag-role-checklist-skins').html(
+            view.skins.length ? checklistRowsHtml(view.skins) : '<small class="nag-hint">没有搜索到皮肤</small>',
+        );
+        updateChecklistCount();
+    }
+
+    /** Select or clear the visible, not-yet-added rows of one section. */
+    function setChecklistSection(section, selected) {
+        $(section)
+            .find('.nag-role-checklist-check:not(:disabled)')
+            .each(function () {
+                this.checked = selected;
+                if (selected) checklistSelection.add(this.value);
+                else checklistSelection.delete(this.value);
+            });
+        updateChecklistCount();
+    }
+
+    function addChecklistSelection() {
+        if (settings.isRunning || fileOperation) return toastr.warning('请先停止任务，再修改角色名单');
+        if (settings.generationMode !== 'role-batch') return;
+        const library = settings.roleImageLibrary;
+        if (!hasChecklistRoles(library)) return;
+        const order = [...library.checklist.roles, ...library.checklist.skins];
+        const names = order.filter((name) => checklistSelection.has(name));
+        if (!names.length) return toastr.info('请先勾选要加入的角色');
+        const result = addNamesToRoster(settings.roleNames, names);
+        settings.roleNames = result.text;
+        $('#nag-set-prompt').val(settings.roleNames);
+        roleRunner.saveInput();
+        saveSettings();
+        checklistSelection.clear();
+        updateUI();
+        toastr.success(
+            `已加入 ${result.added.length} 个名字${result.skipped ? `，${result.skipped} 个已在名单中跳过` : ''}`,
+        );
     }
 
     let previewName = null;
@@ -1084,6 +1192,7 @@ export function initNovelUI(host) {
             imageCount ? `${imageLibrary.workName}：${imageCount} 张图片` : '尚未导入作品图片',
         );
         $('#nag-btn-role-image-import, #nag-btn-role-image-clear, #nag-role-image-file').prop('disabled', busy);
+        if (batchMode) renderChecklistPicker();
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
         const archiveNameSet = new Set(archiveNames);
         renderRoleArchive(archiveNames);
@@ -1278,6 +1387,29 @@ export function initNovelUI(host) {
                                 <input id="nag-role-image-file" type="file" accept=".zip,application/zip" hidden>
                             </div>
                             <small id="nag-role-image-library-summary" class="nag-hint">尚未导入作品图片</small>
+                            <div class="nag-btn-row">
+                                <button type="button" id="nag-btn-role-checklist-toggle" class="menu_button" style="display:none">📋 从清单添加到名单</button>
+                            </div>
+                            <small id="nag-role-checklist-legacy" class="nag-hint" style="display:none">这个图片库是旧版本导入的，没有保存清单里的角色名。清空图片库后重新导入同一个 ZIP，即可从清单把角色加入名单。</small>
+                            <div id="nag-role-checklist" class="nag-role-checklist" hidden>
+                                <input type="search" id="nag-role-checklist-search" class="text_pole" placeholder="搜索角色名" autocomplete="off" enterkeyhint="search">
+                                <small id="nag-role-checklist-summary" class="nag-hint"></small>
+                                <div class="nag-btn-row nag-role-checklist-actions">
+                                    <button type="button" class="menu_button nag-role-checklist-all" data-target="#nag-role-checklist-roles">全选</button>
+                                    <button type="button" class="menu_button nag-role-checklist-none" data-target="#nag-role-checklist-roles">全不选</button>
+                                    <button type="button" id="nag-btn-role-checklist-add" class="menu_button" disabled>➕ 加入名单（0）</button>
+                                </div>
+                                <div id="nag-role-checklist-roles" class="nag-role-checklist-list"></div>
+                                <details id="nag-role-checklist-skins-wrap" class="nag-role-checklist-skins" style="display:none">
+                                    <summary>皮肤（<span id="nag-role-checklist-skins-count">0</span>）</summary>
+                                    <div class="nag-btn-row nag-role-checklist-actions">
+                                        <button type="button" class="menu_button nag-role-checklist-all" data-target="#nag-role-checklist-skins">全选皮肤</button>
+                                        <button type="button" class="menu_button nag-role-checklist-none" data-target="#nag-role-checklist-skins">全不选皮肤</button>
+                                    </div>
+                                    <div id="nag-role-checklist-skins" class="nag-role-checklist-list"></div>
+                                </details>
+                                <small class="nag-hint">名字和清单完全一致，加入后与图片同名；已在名单里的灰色不可选。全选只选当前搜索结果。</small>
+                            </div>
                             <small class="nag-hint">名单里角色名右边有缩略图＝有图，点缩略图看原图；空框＝无图，照常按文字生成。匹配顺序：先完整名称，再去掉作品名后按「角色名+备注」（如 安比（绝区零）改 → 安比（改））；写了备注但没有对应形态图时不使用本体图，不做模糊匹配。</small>
                         </div>
                         <small id="nag-role-duplicate-hint" class="nag-hint" style="display:none"></small>
@@ -1687,6 +1819,20 @@ export function initNovelUI(host) {
             void importRoleImageFile(this.files?.[0]);
         });
         $('#nag-btn-role-image-clear').on('click', clearRoleImages);
+        $('#nag-btn-role-checklist-toggle').on('click', () => {
+            checklistOpen = !checklistOpen;
+            renderChecklistPicker(true);
+        });
+        $('#nag-role-checklist-search').on('input', () => renderChecklistPicker());
+        $('#nag-role-checklist').on('change', '.nag-role-checklist-check', function () {
+            if (this.checked) checklistSelection.add(this.value);
+            else checklistSelection.delete(this.value);
+            updateChecklistCount();
+        });
+        $('#nag-role-checklist').on('click', '.nag-role-checklist-all, .nag-role-checklist-none', function () {
+            setChecklistSection(this.dataset.target, this.classList.contains('nag-role-checklist-all'));
+        });
+        $('#nag-btn-role-checklist-add').on('click', addChecklistSelection);
         $('#nag-role-image-preview').on('click', '.nag-role-image-preview-toggle', function () {
             if (settings.isRunning || fileOperation || previewName == null) return;
             const disabled = !isRoleImageDisabled(previewName, settings.roleImageLibrary);

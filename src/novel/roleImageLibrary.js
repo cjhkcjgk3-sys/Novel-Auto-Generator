@@ -1,3 +1,4 @@
+import { parseRoleNames } from './roleBatchState.js';
 import { canReadZipOnDemand, openZip, openZipWithJSZip } from './zipReader.js';
 
 export const ROLE_IMAGE_FOLDER = 'novel-auto-generator-role-images';
@@ -305,6 +306,91 @@ function parseChecklist(text, directory) {
     return rows;
 }
 
+const TASK_LINE = /^\s*-\s*\[[ xX]\]\s+(.*)$/;
+const LINKED_NAME = /^\[([^\]]+)\]\((?:<[^>]+>|[^)]*)\)/;
+const HEADING = /^\s*(#{1,6})\s+(.+?)\s*#*\s*$/;
+
+/**
+ * Every role name listed in the 清单, linked (has an image path) or not, checked or not.
+ * Entries under a 「## 皮肤」 heading (and its sub-headings) go to `skins`; the rest to `roles`.
+ * Names keep the 清单 spelling exactly, e.g. `拉菲（泳装）`; trailing 别名：/备注： text is dropped.
+ */
+export function parseChecklistRoles(text) {
+    const roles = [];
+    const skins = [];
+    let skinLevel = 0;
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const heading = line.match(HEADING);
+        if (heading) {
+            const level = heading[1].length;
+            if (skinLevel && level <= skinLevel) skinLevel = 0;
+            if (!skinLevel && level >= 2 && /^皮肤/u.test(heading[2].trim())) skinLevel = level;
+            continue;
+        }
+        const task = line.match(TASK_LINE);
+        if (!task) continue;
+        const body = task[1].trim();
+        const linked = body.match(LINKED_NAME);
+        const name = (linked ? linked[1] : body.replace(/(?:^|\s+)(?:别名|备注)[:：].*$/u, '')).trim();
+        if (name) (skinLevel ? skins : roles).push(name);
+    }
+    const roleList = parseRoleNames(roles.join('\n'));
+    const roleSet = new Set(roleList);
+    return { roles: roleList, skins: parseRoleNames(skins.join('\n')).filter((name) => !roleSet.has(name)) };
+}
+
+/** Whether this library was imported with its 清单 names (1.15.0+). */
+export function hasChecklistRoles(library) {
+    return Array.isArray(library?.checklist?.roles) && Array.isArray(library?.checklist?.skins);
+}
+
+function matchesQuery(name, query) {
+    if (!query) return true;
+    if (name.includes(query)) return true;
+    const key = compact(query);
+    return !!key && compact(name).includes(key);
+}
+
+/**
+ * Rows for the “从清单添加” picker: each 清单 name with whether it is already in the roster
+ * (exact full name) and whether the library has an image for it. Null for libraries without names.
+ */
+export function listChecklistRoles(library, rosterText = '', query = '') {
+    if (!hasChecklistRoles(library)) return null;
+    const roster = new Set(parseRoleNames(rosterText));
+    const needle = String(query || '').trim();
+    const index = cachedIndex(library);
+    const rows = (names) =>
+        names
+            .filter((name) => matchesQuery(name, needle))
+            .map((name) => ({
+                name,
+                inRoster: roster.has(name),
+                hasImage: !!matchRoleImage(name, library, index).item,
+            }));
+    return {
+        roles: rows(library.checklist.roles),
+        skins: rows(library.checklist.skins),
+        total: library.checklist.roles.length + library.checklist.skins.length,
+    };
+}
+
+/** Append names to the roster text, one per line, skipping exact full names already present. */
+export function addNamesToRoster(rosterText, names) {
+    const current = parseRoleNames(rosterText);
+    const seen = new Set(current);
+    const added = [];
+    let skipped = 0;
+    for (const name of parseRoleNames((Array.isArray(names) ? names : []).join('\n'))) {
+        if (seen.has(name)) skipped++;
+        else {
+            seen.add(name);
+            added.push(name);
+        }
+    }
+    return { text: [...current, ...added].join('\n'), added, skipped };
+}
+
 function isJunkEntry(name) {
     const parts = name.split('/');
     return parts.includes('__MACOSX') || parts.at(-1).startsWith('._');
@@ -493,7 +579,7 @@ export async function importRoleImageZip(
             throw new Error(saveFailures ? '酒馆未能保存图片，请检查酒馆图片接口后重试' : 'ZIP 中没有可读取的角色图片');
         }
         return {
-            library: { workName, workNames, items, noImageNames: [] },
+            library: { workName, workNames, items, noImageNames: [], checklist: parseChecklistRoles(manifest) },
             imported: items.length,
             skipped,
         };

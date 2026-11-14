@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
 import {
+    addNamesToRoster,
     clearRoleImageLibrary,
     createRoleImageIndex,
     getRoleImageForRequest,
+    hasChecklistRoles,
     importRoleImageZip,
+    listChecklistRoles,
     matchRoleImage,
+    parseChecklistRoles,
     parseChecklistWorkNames,
     parseRoleImageName,
     setRoleImageDisabled,
@@ -440,5 +444,86 @@ describe('importRoleImageZip', () => {
         const cleared = await clearRoleImageLibrary(result.library, ok);
         expect(cleared).toMatchObject({ library: null, deleted: 4, failed: 0 });
         expect(ok.deletes).toHaveLength(8);
+    });
+});
+
+describe('checklist roles → roster', () => {
+    const options = { makeThumbnail: fakeThumbnail };
+    const MANIFEST = `# 碧蓝航线角色图片清单
+
+作品别名：碧蓝航线、碧蓝
+
+## 白鹰
+
+### 超稀有
+
+- [x] [拉菲](<拉菲.png>) 别名：Laffey
+- [x] [拉菲（改造）](<拉菲（改造）.png>)
+- [ ] 恶毒（μ兵装） 备注：残图，需重找
+- [ ] 22 别名：二二
+- [X] [拉菲](<拉菲.png>)
+
+## 皮肤
+
+### 白鹰
+
+- [x] [拉菲（泳装）](<拉菲（泳装）.png>)
+- [ ] 标枪（新春）
+
+## 联动·哔哩哔哩
+
+- [ ] 33
+`;
+
+    it('lists every 清单 name, checked or not, with 皮肤 entries separate', () => {
+        expect(parseChecklistRoles(MANIFEST)).toEqual({
+            roles: ['拉菲', '拉菲（改造）', '恶毒（μ兵装）', '22', '33'],
+            skins: ['拉菲（泳装）', '标枪（新春）'],
+        });
+        expect(parseChecklistRoles('')).toEqual({ roles: [], skins: [] });
+    });
+
+    it('stores the names with the imported library', async () => {
+        const result = await importRoleImageZip(zipFile(zzzEntries()), createHost(), options);
+        expect(hasChecklistRoles(result.library)).toBe(true);
+        expect(result.library.checklist).toEqual({
+            roles: ['安比', '安比（改）', '小安比', '11号', '缺图角色'],
+            skins: [],
+        });
+    });
+
+    it('marks names already in the roster (exact full name) and names with images', async () => {
+        const { library } = await importRoleImageZip(zipFile(zzzEntries()), createHost(), options);
+        const view = listChecklistRoles(library, ' 安比 \n绝区零安比改\n');
+        expect(view.total).toBe(5);
+        expect(view.roles).toEqual([
+            { name: '安比', inRoster: true, hasImage: true },
+            { name: '安比（改）', inRoster: false, hasImage: true },
+            { name: '小安比', inRoster: false, hasImage: true },
+            { name: '11号', inRoster: false, hasImage: true },
+            { name: '缺图角色', inRoster: false, hasImage: false },
+        ]);
+        expect(listChecklistRoles(library, '', '安比').roles.map((row) => row.name)).toEqual([
+            '安比',
+            '安比（改）',
+            '小安比',
+        ]);
+        expect(listChecklistRoles(library, '', '安比(改)').roles.map((row) => row.name)).toEqual(['安比（改）']);
+    });
+
+    it('returns null for libraries imported before names were stored', () => {
+        const legacy = { workName: '绝区零', workNames: ['绝区零'], items: [{ name: '安比', path: 'a.png' }] };
+        expect(hasChecklistRoles(legacy)).toBe(false);
+        expect(listChecklistRoles(legacy, '')).toBeNull();
+        expect(listChecklistRoles(null, '')).toBeNull();
+    });
+
+    it('appends names in order and skips exact duplicates only', () => {
+        expect(addNamesToRoster('安比\n\n妮可 ', ['妮可', '安比（改）', '安比（改）', ' 11号 ', ''])).toEqual({
+            text: '安比\n妮可\n安比（改）\n11号',
+            added: ['安比（改）', '11号'],
+            skipped: 1,
+        });
+        expect(addNamesToRoster('', ['拉菲（泳装）']).text).toBe('拉菲（泳装）');
     });
 });

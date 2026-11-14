@@ -786,6 +786,83 @@
     margin: 6px 0 10px;
 }
 
+/* 从清单添加到名单：手机上整行可点，列表限高滚动 */
+.nag-role-checklist {
+    margin: 6px 0;
+    padding: 6px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.15);
+}
+
+.nag-role-checklist[hidden] {
+    display: none;
+}
+
+.nag-role-checklist input[type='search'] {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 4px;
+}
+
+.nag-role-checklist-actions {
+    flex-wrap: wrap;
+}
+
+.nag-role-checklist-list {
+    max-height: min(50vh, 360px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+.nag-role-checklist-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 2px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+}
+
+.nag-role-checklist-row input {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+}
+
+.nag-role-checklist-name {
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+
+.nag-role-checklist-tag {
+    flex: none;
+    font-size: 0.8em;
+    opacity: 0.75;
+}
+
+.nag-role-checklist-row.has-image .nag-role-checklist-tag {
+    color: #6cc070;
+    opacity: 1;
+}
+
+.nag-role-checklist-row.is-in-roster {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.nag-role-checklist-skins {
+    margin-top: 6px;
+}
+
+.nag-role-checklist-skins > summary {
+    min-height: 32px;
+    line-height: 32px;
+    cursor: pointer;
+}
+
 /* One fixed-size slot at the right of each row: thumbnail = has image, empty dashed box = no image. */
 .nag-role-thumb {
     position: relative;
