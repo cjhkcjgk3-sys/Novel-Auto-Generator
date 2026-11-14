@@ -104,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.8';
+    const pluginVersion = '1.15.10';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1276,30 +1276,40 @@ export function initNovelUI(host) {
         return matcher;
     }
 
-    // 列表分页：一次只渲染这么多行，其余折叠起来。
-    const ROLE_ROWS_PAGE = 200;
-    let roleRowsLimit = ROLE_ROWS_PAGE;
-    let archiveRowsLimit = ROLE_ROWS_PAGE;
+    // 列表分页：只保留当前页的行，翻页后不累积 DOM。
+    const ROLE_ROWS_PAGE = 100;
+    let roleRowsPage = 0;
+    let archiveRowsPage = 0;
+
+    function renderPager(prefix, total, page) {
+        const pages = Math.max(1, Math.ceil(total / ROLE_ROWS_PAGE));
+        $(`#${prefix}-pager`).toggle(total > ROLE_ROWS_PAGE);
+        $(`#${prefix}-prev`).prop('disabled', page === 0);
+        $(`#${prefix}-more`)
+            .prop('disabled', page >= pages - 1)
+            .text('下一页');
+        $(`#${prefix}-page`).text(`${page + 1} / ${pages} 页（共 ${total} 个）`);
+    }
 
     let renderedArchiveKey = null;
     function renderRoleArchive(names) {
-        const shown = names.slice(0, archiveRowsLimit);
-        const key = archiveRowsLimit + '\u0000' + names.join('\n');
+        archiveRowsPage = Math.min(archiveRowsPage, Math.max(0, Math.ceil(names.length / ROLE_ROWS_PAGE) - 1));
+        const start = archiveRowsPage * ROLE_ROWS_PAGE;
+        const shown = names.slice(start, start + ROLE_ROWS_PAGE);
+        const key = archiveRowsPage + '\u0000' + names.join('\n');
         if (key === renderedArchiveKey) return;
         renderedArchiveKey = key;
         $('#nag-archive-count').text(names.length ? `（${names.length}）` : '');
         const rows = shown.map(
             (name, index) =>
-                `<div class="nag-archive-row"><span class="nag-archive-name">${escapeHtml(name)}</span><button type="button" class="menu_button nag-archive-remove" data-index="${index}">删除</button></div>`,
+                `<div class="nag-archive-row"><span class="nag-archive-name">${escapeHtml(name)}</span><button type="button" class="menu_button nag-archive-remove" data-index="${start + index}">删除</button></div>`,
         );
         $('#nag-archive-list').html(
             rows.length
                 ? rows.join('')
                 : '<small class="nag-hint">还没有收录任何角色。生成成功会自动收录，也可以在下面批量添加。</small>',
         );
-        $('#nag-archive-more')
-            .toggle(names.length > shown.length)
-            .text(`显示更多（还剩 ${names.length - shown.length} 个）`);
+        renderPager('nag-archive', names.length, archiveRowsPage);
     }
 
     function saveRoleArchive(next, message) {
@@ -1392,15 +1402,18 @@ export function initNovelUI(host) {
         $('#nag-total-label').text(batchMode ? '角色总数（自动）' : '目标章节');
         $('#nag-prompt-label').text(batchMode ? '角色名单（每行一个）' : '提示词');
         $('#nag-role-results').toggle(batchMode);
-        const allRowEntries = batchMode
-            ? roleNames.map((name, index) => {
+        roleRowsPage = Math.min(roleRowsPage, Math.max(0, Math.ceil(roleNames.length / ROLE_ROWS_PAGE) - 1));
+        const rowStart = roleRowsPage * ROLE_ROWS_PAGE;
+        const shownRows = batchMode
+            ? roleNames.slice(rowStart, rowStart + ROLE_ROWS_PAGE).map((name, offset) => {
+                  const index = rowStart + offset;
                   const item = batch?.items[index] || {};
                   const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
                   const manual = item.manualStatus ? '（手动）' : '';
                   const archivedMark =
                       item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
                   const controls =
-                      roleCorrection && item.id && !busy
+                      roleCorrection && item.id
                           ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`
                           : '';
                   return {
@@ -1411,13 +1424,10 @@ export function initNovelUI(host) {
                   };
               })
             : [];
-        // 上千个角色时一次性渲染全部行会让滚动明显卡顿：先渲染前面一部分，
-        // 其余用「显示更多」按需展开，编号仍然是原始的 1..N。
-        const shownRows = allRowEntries.slice(0, roleRowsLimit);
+        // 只计算当前页，避免隐藏行仍重复进行名称、图片匹配和 HTML 构造。
         renderRoleRows($('#nag-role-results')[0], shownRows);
-        $('#nag-role-rows-more')
-            .toggle(allRowEntries.length > shownRows.length)
-            .text(`显示更多（还剩 ${allRowEntries.length - shownRows.length} 个）`);
+        renderPager('nag-role-rows', batchMode ? roleNames.length : 0, roleRowsPage);
+        $('#nag-role-results .nag-role-status-set').prop('disabled', busy);
         syncRoleImagePreviewToggle();
 
         const [txt, cls] = settings.isRunning
@@ -1575,7 +1585,7 @@ export function initNovelUI(host) {
                         </div>
                         <small id="nag-role-correction-hint" class="nag-hint" style="display:none">只修改名单状态，不删除回复。标记失败后可继续生成；标记完成不会创建正文，没有正文时无法导出该角色。</small>
                         <div id="nag-role-results" class="ttw-memory-queue" style="display:none"></div>
-                        <button type="button" id="nag-role-rows-more" class="menu_button nag-role-more" style="display:none"></button>
+                        <div id="nag-role-rows-pager" class="nag-btn-row" style="display:none"><button type="button" id="nag-role-rows-prev" class="menu_button">上一页</button><small id="nag-role-rows-page" class="nag-hint" aria-live="polite"></small><button type="button" id="nag-role-rows-more" class="menu_button">下一页</button></div>
                     </div>
                 </div>
 
@@ -1590,7 +1600,7 @@ export function initNovelUI(host) {
                     <div class="nag-panel-content">
                         <small class="nag-hint">生成成功会自动收录名字；生成名单里出现名录中的名字时自动跳过并标记“（名录）”，不会重复生成。想重新生成某个角色，先在这里删除它的名字。名录在所有聊天中共用，不写入角色卡或世界书。</small>
                         <div id="nag-archive-list" class="nag-archive-list"></div>
-                        <button type="button" id="nag-archive-more" class="menu_button nag-role-more" style="display:none"></button>
+                        <div id="nag-archive-pager" class="nag-btn-row" style="display:none"><button type="button" id="nag-archive-prev" class="menu_button">上一页</button><small id="nag-archive-page" class="nag-hint" aria-live="polite"></small><button type="button" id="nag-archive-more" class="menu_button">下一页</button></div>
                         <div class="nag-btn-row">
                             <button type="button" id="nag-btn-archive-collect" class="menu_button">收录当前已完成</button>
                             <button type="button" id="nag-btn-archive-clear" class="menu_button">清空名录</button>
@@ -1829,14 +1839,15 @@ export function initNovelUI(host) {
             roleCorrection = !roleCorrection;
             updateUI();
         });
-        $('#nag-role-rows-more').on('click', () => {
-            roleRowsLimit += ROLE_ROWS_PAGE;
+        $('#nag-role-rows-more, #nag-role-rows-prev').on('click', function () {
+            roleRowsPage = Math.max(0, roleRowsPage + (this.id.endsWith('-prev') ? -1 : 1));
             updateUI();
+            $('#nag-role-results').scrollTop(0);
         });
-        $('#nag-archive-more').on('click', () => {
-            archiveRowsLimit += ROLE_ROWS_PAGE;
-            renderedArchiveKey = null;
+        $('#nag-archive-more, #nag-archive-prev').on('click', function () {
+            archiveRowsPage = Math.max(0, archiveRowsPage + (this.id.endsWith('-prev') ? -1 : 1));
             updateUI();
+            $('#nag-archive-list').scrollTop(0);
         });
         $('#nag-role-results').on('click', '.nag-role-status-set', async function () {
             if (settings.isRunning || fileOperation) return;

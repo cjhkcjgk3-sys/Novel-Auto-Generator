@@ -88,47 +88,52 @@ export function parseWithWorkKeys(value, workKeys) {
     return { role, notes, key: role + notes.join(''), work };
 }
 
+// Reverse UTF-16 code units so prefix comparison exactly preserves String#slice suffix semantics.
+const reverseName = (name) => name.split('').reverse().join('');
+
 /**
  * 名录和名单之间比对“是不是同一个角色”。
  *
  * 名单可以不写作品名（`约克城II`），名录里记的可能是全名（`碧蓝航线·约克城II`）；
- * 图片匹配早就允许作品名可选，名录这里却一直是精确比较，于是同一个角色会被当成两个。
- * 规则和图片匹配保持一致：先去掉作品名比“角色名+备注”，作品名都写了就要求是同一个作品。
- * 作品名清单没登记时，退一步按“一个是另一个的后缀”认——只用于判断是否同一角色，不会用来配图。
+ * 图片匹配早就允许作品名可选、忽略全／半角与括号，名录沿用同一解析规则。
+ * 作品名清单没登记时，保留原有的后缀回退；这条规则不用于配图。
  */
 export function createRoleNameMatcher(names, workNames = []) {
-    const entries = [];
-    const suffixes = new Set();
+    const workKeys = workKeysOf(workNames);
+    const byKey = new Map();
+    const reversedNames = new Set();
     for (const raw of Array.isArray(names) ? names : []) {
         const name = String(raw ?? '').trim();
         if (!name) continue;
-        const parsed = parseRoleImageName(name, workNames);
+        const parsed = parseWithWorkKeys(name, workKeys);
         const compactName = compact(name);
-        entries.push({ compact: compactName, work: parsed.work, key: parsed.key });
-        // 只收长度 >= 2 的后缀，避免单字误配
-        for (let start = 0; start < compactName.length - 1; start++) suffixes.add(compactName.slice(start));
+        if (compactName.length > 1) reversedNames.add(reverseName(compactName));
+        if (!parsed.key) continue;
+        if (!byKey.has(parsed.key)) byKey.set(parsed.key, new Set());
+        byKey.get(parsed.key).add(parsed.work);
     }
-    const byKey = new Map();
-    for (const entry of entries) {
-        if (!entry.key) continue;
-        if (!byKey.has(entry.key)) byKey.set(entry.key, []);
-        byKey.get(entry.key).push(entry);
-    }
+    // A suffix of a name becomes a prefix of its reversal. Store one string per name,
+    // rather than allocating every suffix (quadratic character storage for long names).
+    const sortedNames = [...reversedNames].sort();
     return {
         /** 名录里是否已经有这个角色（任一可接受写法都算）。 */
         has(value) {
             const name = String(value ?? '').trim();
             if (!name) return false;
-            const parsed = parseRoleImageName(name, workNames);
-            const candidates = byKey.get(parsed.key);
-            if (candidates?.length) {
-                // 名单没写作品名：认作同一个角色
-                if (!parsed.work) return true;
-                // 两边都写了作品名：必须是同一作品，或名录那条没写作品名
-                if (candidates.some((entry) => !entry.work || entry.work === parsed.work)) return true;
-            }
+            const parsed = parseWithWorkKeys(name, workKeys);
+            const works = byKey.get(parsed.key);
+            if (works && (!parsed.work || works.has('') || works.has(parsed.work))) return true;
             const target = compact(name);
-            return target.length > 1 && suffixes.has(target);
+            if (target.length < 2) return false;
+            const reversed = reverseName(target);
+            let low = 0;
+            let high = sortedNames.length;
+            while (low < high) {
+                const middle = low + Math.floor((high - low) / 2);
+                if (sortedNames[middle] < reversed) low = middle + 1;
+                else high = middle;
+            }
+            return sortedNames[low]?.startsWith(reversed) ?? false;
         },
     };
 }
