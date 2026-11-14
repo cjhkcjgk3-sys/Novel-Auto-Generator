@@ -103,7 +103,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.3';
+    const pluginVersion = '1.15.4';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1023,9 +1023,35 @@ export function initNovelUI(host) {
     }
 
     let previewName = null;
+
+    /**
+     * 全屏看图用原生 <dialog> 提进浏览器顶层（top layer）。
+     *
+     * 酒馆在 html 上设了 `-webkit-transform: translateZ(0)` 和 `-webkit-perspective: 1000`，
+     * 这两个属性都会让 html 成为 `position: fixed` 的包含块，固定定位就不再贴住视口，
+     * 弹层会跟着文档盒子跑、跑到屏幕外。top layer 不受任何祖先的 transform / overflow /
+     * z-index 影响，是这里唯一稳定的做法。老 WebView 没有 showModal() 时退回普通固定层。
+     */
+    function openRoleImagePreviewLayer(preview) {
+        // 面板重绘可能把弹层放回 #extensions_settings，每次打开都重新挂到 body 上。
+        if (preview.parentElement !== document.body) document.body.appendChild(preview);
+        preview.hidden = false;
+        if (typeof preview.showModal === 'function' && !preview.open) {
+            try {
+                preview.showModal();
+                return;
+            } catch {
+                // 退回到下面的非模态渲染
+            }
+        }
+        preview.setAttribute('open', '');
+    }
+
     function closeRoleImagePreview() {
         const preview = document.getElementById('nag-role-image-preview');
         if (!preview) return;
+        if (typeof preview.close === 'function' && preview.open) preview.close();
+        preview.removeAttribute('open');
         preview.hidden = true;
         previewName = null;
         // Drop the decoded original so only thumbnails stay in memory.
@@ -1055,7 +1081,7 @@ export function initNovelUI(host) {
         const caption = preview.querySelector('.nag-role-image-preview-caption');
         if (caption) caption.textContent = image.name === name ? name : `${name} → ${image.name}`;
         syncRoleImagePreviewToggle();
-        preview.hidden = false;
+        openRoleImagePreviewLayer(preview);
     }
 
     function roleImageSlot(name, index, imageLibrary) {
@@ -1652,8 +1678,8 @@ export function initNovelUI(host) {
 
             </div>
         </div>
-        <div id="nag-role-image-preview" class="nag-role-image-preview-layer" hidden>
-            <div class="nag-role-image-preview-dialog" role="dialog" aria-modal="true" aria-label="角色原图">
+        <dialog id="nag-role-image-preview" class="nag-role-image-preview-layer" aria-label="角色原图">
+            <div class="nag-role-image-preview-dialog">
                 <button type="button" class="nag-role-image-preview-close" aria-label="关闭">✕</button>
                 <img alt="" decoding="async">
                 <div class="nag-role-image-preview-bar">
@@ -1661,7 +1687,7 @@ export function initNovelUI(host) {
                     <button type="button" class="menu_button nag-role-image-preview-toggle"></button>
                 </div>
             </div>
-        </div>
+        </dialog>
     </div>`;
 
         $('#extensions_settings').append(html);
@@ -1853,7 +1879,13 @@ export function initNovelUI(host) {
             showRoleImagePreview(Number(this.dataset.index));
         });
         $('#nag-role-image-preview').on('click', function (event) {
-            if (event.target === this || event.target.closest('.nag-role-image-preview-close')) closeRoleImagePreview();
+            // top layer 里的弹层铺满整屏，没有可点的"背景"，所以点图片或容器空白处也关闭。
+            const target = event.target;
+            const onBackdrop =
+                target === this ||
+                target.tagName === 'IMG' ||
+                target.classList?.contains('nag-role-image-preview-dialog');
+            if (onBackdrop || target.closest('.nag-role-image-preview-close')) closeRoleImagePreview();
         });
         $(document).on('keydown.nagRoleImagePreview', (event) => {
             if (event.key === 'Escape') closeRoleImagePreview();
