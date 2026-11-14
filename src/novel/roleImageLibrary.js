@@ -1,5 +1,15 @@
 import { parseRoleNames } from './roleBatchState.js';
 import { canReadZipOnDemand, openZip, openZipWithJSZip } from './zipReader.js';
+import {
+    compact,
+    normalizeRoleImageName,
+    parseRoleImageName,
+    parseWithWorkKeys,
+    uniqueStrings,
+    workKeysOf,
+} from './roleName.js';
+
+export { normalizeRoleImageName, parseRoleImageName };
 
 export const ROLE_IMAGE_FOLDER = 'novel-auto-generator-role-images';
 const MANAGED_IMAGE_PREFIX = `user/images/${ROLE_IMAGE_FOLDER}/`;
@@ -16,93 +26,6 @@ const EXTENSIONS = new Map([
     ['webp', 'webp'],
 ]);
 const MIME_TYPES = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
-
-function uniqueStrings(values) {
-    return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
-}
-
-// ============================================
-// 名称匹配：[作品名前缀] + 角色名 + [备注（皮肤/装甲/形态）]
-// ============================================
-
-const OPEN_BRACKETS = '(（[［{｛【〔〖「『《〈<＜';
-const CLOSE_BRACKETS = ')）]］}｝】〕〗」』》〉>＞';
-
-/** Fold width, brackets and case; brackets all become ASCII parentheses. */
-function unifyName(value) {
-    let text = String(value ?? '').normalize('NFKC');
-    let result = '';
-    for (const character of text) {
-        if (OPEN_BRACKETS.includes(character)) result += '(';
-        else if (CLOSE_BRACKETS.includes(character)) result += ')';
-        else result += character;
-    }
-    text = result.toLowerCase();
-    return text;
-}
-
-/** Remove punctuation, symbols, spaces and middle dots; keep letters, digits and CJK. */
-function compact(value) {
-    return unifyName(value).replace(/[\p{P}\p{S}\p{Cf}\p{Z}\s]+/gu, '');
-}
-
-/** Full-string key: only width, punctuation, brackets, spaces and case are ignored. */
-export function normalizeRoleImageName(value) {
-    return compact(value);
-}
-
-function workKeysOf(workNames) {
-    return uniqueStrings((Array.isArray(workNames) ? workNames : []).map(compact)).sort((a, b) => b.length - a.length);
-}
-
-/**
- * Split a name into role and notes, dropping the work name wherever it appears as a prefix or
- * as bracket content. `安比（绝区零）改`, `绝区零安比改` and `安比（改）` all give key `安比改`.
- * `work` is the removed work name (compact form), or '' when the name carries none.
- */
-export function parseRoleImageName(value, workNames = []) {
-    return parseWithWorkKeys(value, workKeysOf(workNames));
-}
-
-function parseWithWorkKeys(value, workKeys) {
-    const text = unifyName(value);
-    let outside = '';
-    const groups = [];
-    let depth = 0;
-    let current = '';
-    for (const character of text) {
-        if (character === '(') {
-            if (depth > 0) current += character;
-            depth++;
-        } else if (character === ')' && depth > 0) {
-            depth--;
-            if (depth === 0) {
-                groups.push(current);
-                current = '';
-            } else current += character;
-        } else if (depth > 0) current += character;
-        else outside += character;
-    }
-    if (depth > 0) outside += current;
-    const workSet = new Set(workKeys);
-    const compactGroups = groups.map(compact);
-    const notes = compactGroups.filter((note) => note && !workSet.has(note));
-    let work = compactGroups.find((note) => workSet.has(note)) || '';
-    let role = compact(outside);
-    for (const key of workKeys) {
-        if (role.length > key.length && role.startsWith(key)) {
-            role = role.slice(key.length);
-            work ||= key;
-            break;
-        }
-    }
-    if (workSet.has(role)) {
-        work ||= role;
-        role = '';
-    }
-    if (!role && notes.length) role = notes.shift();
-    return { role, notes, key: role + notes.join(''), work };
-}
 
 function addToIndex(map, key, item) {
     if (!key) return;

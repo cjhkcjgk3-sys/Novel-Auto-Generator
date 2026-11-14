@@ -13,6 +13,7 @@ import {
 } from './roleBatchState.js';
 import { createNovelRunner } from './generation.js';
 import { createRoleBatchRunner, parseRoleNames } from './roleBatch.js';
+import { createRoleNameMatcher } from './roleName.js';
 import { createListRenderer } from '../../txtToWorldbook/ui/renderer.js';
 import { createErrorRecord } from '../../txtToWorldbook/core/logger.js';
 import { parseTagInput, extractTagContents, removeTagContents, applyTagFilters } from './tagFilters.js';
@@ -103,7 +104,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.5';
+    const pluginVersion = '1.15.6';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1276,7 +1277,7 @@ export function initNovelUI(host) {
         $('#nag-btn-role-image-import, #nag-btn-role-image-clear, #nag-role-image-file').prop('disabled', busy);
         if (batchMode) renderChecklistPicker();
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
-        const archiveNameSet = new Set(archiveNames);
+        const archiveNameMatcher = createRoleNameMatcher(archiveNames, imageLibrary?.workNames);
         renderRoleArchive(archiveNames);
         const repeatedNames = batchMode ? duplicateRoleNames(settings.roleNames) : [];
         $('#nag-role-duplicate-hint')
@@ -1333,9 +1334,7 @@ export function initNovelUI(host) {
                       const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
                       const manual = item.manualStatus ? '（手动）' : '';
                       const archivedMark =
-                          item.archived || (!roleComplete(item) && archiveNameSet.has(String(name).trim()))
-                              ? '（名录）'
-                              : '';
+                          item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
                       const controls =
                           roleCorrection && item.id && !busy
                               ? `<span class="nag-role-correction-actions"><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="complete">✓ 完成</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="failed">✗ 失败</button><button type="button" class="menu_button nag-role-status-set" data-index="${index}" data-status="auto">自动</button></span>`

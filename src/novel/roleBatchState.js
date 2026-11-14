@@ -1,4 +1,5 @@
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
+import { createRoleNameMatcher } from './roleName.js';
 
 export const roleComplete = (item) =>
     item?.manualStatus === 'complete' || (item?.manualStatus !== 'failed' && !!item?.processed && !item.failed);
@@ -111,8 +112,10 @@ export function removeRoleArchiveName(archive, name) {
  * Mark list entries the persisted archive already holds as finished without generating them again.
  * Releasing a name from the archive lets the next run regenerate that role.
  */
-export function applyArchiveSkips(batch, archive) {
-    const archived = new Set(normalizeRoleArchive(archive));
+export function applyArchiveSkips(batch, archive, workNames = []) {
+    // 名录里可能记着全名（碧蓝航线·约克城II），名单却只写角色名（约克城II），
+    // 所以走和图片匹配同一套规则，而不是精确比较。
+    const archived = createRoleNameMatcher(normalizeRoleArchive(archive), workNames);
     const skipped = [];
     for (const item of batch?.items || []) {
         const name = String(item.name || '').trim();

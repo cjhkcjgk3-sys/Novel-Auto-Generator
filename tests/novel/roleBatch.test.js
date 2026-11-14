@@ -172,6 +172,38 @@ it('marks archived names as finished and releases them once deleted from the arc
     expect(batch.index).toBe(0);
 });
 
+it('treats a name written with and without the work name as the same archived role', () => {
+    const batch = {
+        id: 'b',
+        names: ['约克城II'],
+        items: [{ id: 'a', name: '约克城II' }],
+        history: [],
+    };
+    // 名录里记的是「作品名·角色名」，名单只写了角色名
+    expect(applyArchiveSkips(batch, ['碧蓝航线·约克城II'])).toEqual(['约克城II']);
+    expect(batch.items[0]).toMatchObject({ archived: true, processed: true });
+});
+
+it('keeps the same character from different works apart in the archive', () => {
+    const batch = {
+        id: 'b',
+        names: ['最终幻想8蒂法'],
+        items: [{ id: 'a', name: '最终幻想8蒂法' }],
+        history: [],
+    };
+    expect(applyArchiveSkips(batch, ['最终幻想7蒂法'])).toEqual([]);
+});
+
+it('uses the work name list when checking the archive', () => {
+    const batch = {
+        id: 'b',
+        names: ['安比'],
+        items: [{ id: 'a', name: '安比' }],
+        history: [],
+    };
+    expect(applyArchiveSkips(batch, ['绝区零安比'], ['绝区零'])).toEqual(['安比']);
+});
+
 it('skips archived names without calling the model and records new completions', async () => {
     vi.useFakeTimers();
     const { settings, host, runner, archived } = setup();

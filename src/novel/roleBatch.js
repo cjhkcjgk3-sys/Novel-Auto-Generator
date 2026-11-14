@@ -189,7 +189,7 @@ export function createRoleBatchRunner({
             updateRoleNames(batch, names);
             batch.inputNames = settings.roleNames;
             batch.inputLimit = settings.totalChapters;
-            const archivedSkips = applyArchiveSkips(batch, settings.roleArchive);
+            const archivedSkips = applyArchiveSkips(batch, settings.roleArchive, settings.roleImageLibrary?.workNames);
             if (archivedSkips.length)
                 notify(
                     'info',
