@@ -12,6 +12,7 @@ export function createRoleResultIsolation({
     getBatch,
     getRoleImage = () => null,
     mediaApi = null,
+    onImageSkipped = () => {},
     onError = () => {},
     restoreLegacyVisibility = async () => {},
 }) {
@@ -85,12 +86,25 @@ export function createRoleResultIsolation({
         if (current) await verifyRoleResults(current.message, { assertCurrent: () => assertTarget(current) });
     }
 
+    /** Why the host would silently drop a matched image ('' when it will be sent). */
+    async function imageSkipReason(image) {
+        if (!mediaApi) return '当前酒馆版本没有发送图片的接口（需要 1.14 及以上）';
+        if (mediaApi.canInlineImages?.() === false)
+            return '酒馆不会为当前接口/模型发送图片：请确认使用 Chat Completion 接口、已打开「发送内嵌图片」，且酒馆把当前模型识别为支持识图（酒馆 1.19 的 Google AI Studio、Vertex AI 来源按型号名单判断，还不认识 gemini-4；兼容 OpenAI 的自定义来源会照常发图）';
+        if (mediaApi.imageExists && !(await mediaApi.imageExists(image.path).catch(() => true)))
+            return '图片文件不存在，可能已被删除；请清空图片库后重新导入作品 ZIP';
+        return '';
+    }
+
     async function intercept(messages, _size, abort) {
         const request = messages.findLast((message) => message.is_user && message.extra?.[ROLE_BATCH_REQUEST]);
         if (request) {
             try {
-                const image = await getRoleImage(request.extra[ROLE_BATCH_REQUEST]);
-                if (image?.path) {
+                const marker = request.extra[ROLE_BATCH_REQUEST];
+                const image = await getRoleImage(marker);
+                const skipped = image?.path ? await imageSkipReason(image) : '';
+                if (skipped) onImageSkipped({ ...marker, image, reason: skipped });
+                else if (image?.path) {
                     if (!mediaApi) throw new Error('当前酒馆没有可用的媒体请求接口');
                     const originalExtra = request.extra || {};
                     const originalMedia = Array.isArray(originalExtra.media) ? originalExtra.media : [];

@@ -505,7 +505,8 @@ it('imports to native swipes, restores success under new validation rules and co
     expect(first.settings.roleNames).toBe('琴\n安柏');
     expect(first.settings.totalChapters).toBe(2);
     expect(first.settings.roleBatch.items.every((item) => item.processed && !item.failed)).toBe(true);
-    expect(f.context.chat[2].swipes).toEqual(['<legacy>旧角色原文', '已有角色正文']);
+    // Pages are written inside a ```text block (f03cc04) so helper extensions render them.
+    expect(f.context.chat[2].swipes).toEqual([fenced('<legacy>旧角色原文'), fenced('已有角色正文')]);
     expect(f.context.addOneMessage).toHaveBeenCalledOnce();
     const savedChat = JSON.parse(JSON.stringify(f.context.chat));
     f.context.chat = savedChat;
@@ -528,7 +529,7 @@ it('imports to native swipes, restores success under new validation rules and co
     expect(f.inputs).toHaveLength(1);
     expect(f.inputs[0].history.map((m) => m.mes)).toEqual(['写卡助手', '生成 丽莎']);
     expect(second.settings.roleBatch.names).toEqual(['琴', '安柏', '丽莎']);
-    expect(f.context.chat[2].swipes.slice(0, 2)).toEqual(['<legacy>旧角色原文', '已有角色正文']);
+    expect(f.context.chat[2].swipes.slice(0, 2)).toEqual([fenced('<legacy>旧角色原文'), fenced('已有角色正文')]);
     const exported = await second.runner.exportWorldbook();
     expect(exported.custom).toEqual({ preserved: true });
     expect(exported.entries[41]).toEqual(importedBook.entries[41]);
@@ -548,7 +549,7 @@ it('keeps an existing selected page and treats repeated imports as a no-op for r
     const { runner, settings } = f.create();
     await runner.importWorldbook(importedBook);
     const pages = [...f.context.chat[2].swipes];
-    expect(pages).toEqual(['旧成品', '<legacy>旧角色原文', '已有角色正文']);
+    expect(pages).toEqual(['旧成品', fenced('<legacy>旧角色原文'), fenced('已有角色正文')]);
     expect(f.context.chat[2].mes).toBe('旧成品');
     expect(await runner.importWorldbook(importedBook)).toMatchObject({ added: 0, duplicates: 2 });
     expect(f.context.chat[2].swipes).toEqual(pages);
@@ -591,3 +592,7 @@ it('retains committed import records if only the native preview fails to refresh
     expect(f.recovery.read().names).toEqual(['琴', '安柏']);
     expect(f.context.chat[2].swipes).toHaveLength(3);
 });
+
+function fenced(text) {
+    return '```text\n' + text + '\n```';
+}

@@ -3,6 +3,7 @@ import * as tavernLib from '/lib.js';
 import { extension_settings } from '/scripts/extensions.js';
 import * as tavernUtils from '/scripts/utils.js';
 import { MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE } from '/scripts/constants.js';
+import * as tavernOpenAI from '/scripts/openai.js';
 import { createSillyTavernHost } from './sillyTavern.js';
 export const host = createSillyTavernHost({
     extensionSettings: extension_settings,
@@ -13,6 +14,12 @@ export const host = createSillyTavernHost({
         MEDIA_DISPLAY,
         MEDIA_SOURCE,
         MEDIA_TYPE,
+        // Same check core uses before inlining images; missing on hosts without it (then assume yes).
+        canInlineImages:
+            typeof tavernOpenAI.isImageInliningSupported === 'function'
+                ? () => tavernOpenAI.isImageInliningSupported()
+                : undefined,
+        imageExists: async (path) => (await fetch(path, { method: 'HEAD', cache: 'no-store' })).ok,
     },
     roleImageStorage: {
         getBase64Async: tavernUtils.getBase64Async,

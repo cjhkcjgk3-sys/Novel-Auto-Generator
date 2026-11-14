@@ -103,7 +103,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.2';
+    const pluginVersion = '1.15.3';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -635,6 +635,7 @@ export function initNovelUI(host) {
             settings.roleArchive = mergeRoleArchive(settings.roleArchive, [name]);
         },
     });
+    let imageSkipNoticeBatch = null;
     resultIsolation = host.createRoleResultIsolation({
         getBatch: () =>
             settings.generationMode === 'role-batch' && settings.isolateRoleResult ? settings.roleBatch : null,
@@ -653,6 +654,14 @@ export function initNovelUI(host) {
                 (candidate) => candidate.id === request.itemId,
             );
             return item ? getRoleImageForRequest(item.name, settings.roleImageLibrary) : null;
+        },
+        onImageSkipped: ({ taskId, image, reason }) => {
+            // One non-blocking notice per batch; generation continues without the image.
+            if (imageSkipNoticeBatch === taskId) return;
+            imageSkipNoticeBatch = taskId;
+            toastr.warning(
+                `已匹配到「${image.name || image.fileName}」的图片，但没有发送给模型：${reason}。生成照常进行，本批次不再重复提示。`,
+            );
         },
         restoreLegacyVisibility: () => host.restoreLegacyVisibility(),
         onError: (error, details) => {

@@ -28,6 +28,8 @@ export function createRoleBatchRunner({
     let active = null;
     let preparing = false;
     let restored = false;
+    // Chat where the user just confirmed “从头生成”; its existing pages count as reviewed once.
+    let restartIdentity = null;
     const state = () => getSettings().roleBatch;
     const validationOptions = () => ({
         minLength: getSettings().minChapterLength,
@@ -176,7 +178,9 @@ export function createRoleBatchRunner({
                     items: [],
                 };
                 hydrateRoleBatch(batch);
+                if (restartIdentity === initial.identity) batch.restartReviewed = true;
             }
+            restartIdentity = null;
             if (host.reconcileRoleBatch) await host.reconcileRoleBatch(batch, validationOptions());
             else if (batch.pending) throw new Error('上一轮尚未确认结束，请先查看聊天结果');
             assertCurrent(run);
@@ -197,6 +201,7 @@ export function createRoleBatchRunner({
                 return;
             }
             if (host.confirmUnidentifiedRolePages && !(await host.confirmUnidentifiedRolePages(batch))) return;
+            delete batch.restartReviewed;
             // Persist the review fingerprint set by confirmUnidentifiedRolePages().
             checkpoint();
             assertCurrent(run);
@@ -823,6 +828,7 @@ export function createRoleBatchRunner({
                     await host.restoreRoleTemplate?.(batch);
                 }
                 if (restart) {
+                    restartIdentity = host.snapshot().identity;
                     recovery?.clear();
                     getSettings().roleBatch = null;
                     restored = true;

@@ -70,7 +70,8 @@ export async function runRoleWorkbenchChecks({ page, requests, reopenChat, conne
     assert.equal(current.names, '旧角色甲\n旧角色乙');
     assert.equal(current.items.length, 2);
     assert.ok(current.items.every((item) => item.processed && !item.failed));
-    assert.deepEqual(current.pages, [old.content, second.content]);
+    // Imported pages are shown inside a ```text block (f03cc04); the worldbook keeps the bare text.
+    assert.deepEqual(current.pages, [old.content, second.content].map(fenced));
     assert.ok(current.progress.startsWith('2 / 2'));
     assert.equal(current.rows.split('✅').length - 1, 2);
     await upload(book);
@@ -99,7 +100,7 @@ export async function runRoleWorkbenchChecks({ page, requests, reopenChat, conne
         await (await import('/script.js')).saveSettings();
         await SillyTavern.getContext().saveChat();
     });
-    assert.deepEqual((await state()).pages.slice(0, 2), [old.content, second.content]);
+    assert.deepEqual((await state()).pages.slice(0, 2), [old.content, second.content].map(fenced));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.getElementById('nag-btn-start'));
     await reopenChat();
@@ -151,4 +152,8 @@ export async function runRoleWorkbenchChecks({ page, requests, reopenChat, conne
         previousResultsExcluded: true,
         narrowLayout: layout.fits,
     };
+}
+
+function fenced(text) {
+    return '```text\n' + String(text).trim() + '\n```';
 }

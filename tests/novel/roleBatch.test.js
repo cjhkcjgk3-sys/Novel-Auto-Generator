@@ -101,6 +101,23 @@ it('does not generate if the user declines to continue past unidentified old pag
     expect(host.generateRoleReply).not.toHaveBeenCalled();
     expect(settings.isRunning).toBe(false);
 });
+it('marks the first batch after a confirmed restart as reviewed, only once', async () => {
+    const { host, runner, settings } = setup();
+    const seen = [];
+    host.confirmUnidentifiedRolePages = vi.fn(async (batch) => {
+        seen.push(!!batch.restartReviewed);
+        return false;
+    });
+    await runner.start();
+    await runner.resetPending({ restart: true });
+    await runner.start();
+    expect(settings.roleBatch.restartReviewed).toBe(true);
+    await runner.resetPending();
+    settings.roleBatch = null;
+    await runner.start();
+    expect(seen).toEqual([false, true, false]);
+});
+
 function setup(replies = [{ text: '结果' }]) {
     const settings = { roleNames: '琴\n安柏\n丽莎', totalChapters: 3, replyWaitTime: 0, roleBatch: null };
     const snapshot = { identity: 'chat-a', generating: false };

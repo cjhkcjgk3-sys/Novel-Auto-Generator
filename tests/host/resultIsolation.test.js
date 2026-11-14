@@ -1,7 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { webcrypto } from 'node:crypto';
-import { createRoleResultIsolation, ROLE_RESULT_INTERCEPTOR } from '../../src/host/resultIsolation.js';
+import {
+    createRoleResultIsolation,
+    ROLE_BATCH_REQUEST,
+    ROLE_RESULT_INTERCEPTOR,
+} from '../../src/host/resultIsolation.js';
 import { verifyRoleResults, clearRoleResultHashes } from '../../src/host/roleResultIntegrity.js';
 import { createSillyTavernHost } from '../../src/host/sillyTavern.js';
 
@@ -261,4 +265,54 @@ it('migrates only visibility flags owned by the earlier plugin, preserving nativ
     await host.restoreLegacyVisibility();
     expect(chat).toEqual([{ mes: '旧标记' }, { mes: '用户隐藏', is_system: true }]);
     expect(context.saveChat).toHaveBeenCalledTimes(1);
+});
+
+function imageSetup({ canInline, exists = true } = {}) {
+    const onImageSkipped = vi.fn();
+    const mediaApi = {
+        getMediaDisplay: () => 'list',
+        getMediaIndex: () => 0,
+        MEDIA_DISPLAY: { LIST: 'list', GALLERY: 'gallery' },
+        MEDIA_SOURCE: { UPLOAD: 'upload' },
+        MEDIA_TYPE: { IMAGE: 'image' },
+        canInlineImages: canInline === undefined ? undefined : () => canInline,
+        imageExists: vi.fn(async () => exists),
+    };
+    const isolation = createRoleResultIsolation({
+        getContext: () => ({}),
+        getChat: () => [],
+        getDocument: () => null,
+        getBatch: () => null,
+        snapshot: () => ({ identity: 'chat-a' }),
+        getRoleImage: () => ({ name: '安比', fileName: '安比', path: '/user/images/x/a.webp' }),
+        mediaApi,
+        onImageSkipped,
+    });
+    instances.push(isolation);
+    const marker = { taskId: 'batch', itemId: 'role0', attemptId: 'a1' };
+    const request = { is_user: true, mes: '生成 安比', extra: { [ROLE_BATCH_REQUEST]: marker } };
+    return { isolation, request, marker, onImageSkipped, mediaApi };
+}
+
+it('adds the matched role image to the request copy when the host can send it', async () => {
+    const f = imageSetup({ canInline: true });
+    await globalThis[ROLE_RESULT_INTERCEPTOR]([f.request], 0, vi.fn());
+    expect(f.request.extra.media).toEqual([
+        { url: '/user/images/x/a.webp', type: 'image', title: '安比', source: 'upload' },
+    ]);
+    expect(f.request.extra[ROLE_BATCH_REQUEST]).toBeUndefined();
+    expect(f.onImageSkipped).not.toHaveBeenCalled();
+});
+
+it('reports, without attaching, a matched image the host would silently drop', async () => {
+    const off = imageSetup({ canInline: false });
+    await globalThis[ROLE_RESULT_INTERCEPTOR]([off.request], 0, vi.fn());
+    expect(off.request.extra.media).toBeUndefined();
+    expect(off.onImageSkipped).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: 'batch', reason: expect.stringContaining('发送内嵌图片') }),
+    );
+    const missing = imageSetup({ canInline: true, exists: false });
+    await globalThis[ROLE_RESULT_INTERCEPTOR]([missing.request], 0, vi.fn());
+    expect(missing.request.extra.media).toBeUndefined();
+    expect(missing.onImageSkipped.mock.calls[0][0].reason).toContain('图片文件不存在');
 });

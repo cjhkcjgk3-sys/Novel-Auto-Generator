@@ -3,7 +3,7 @@
 <div align="center">
 
 [![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/CyrilPeng/Novel-Auto-Generator?sort=semver&label=version&color=blue)](https://github.com/CyrilPeng/Novel-Auto-Generator/tags)
-[![SillyTavern](https://img.shields.io/badge/SillyTavern-1.13.2%20%7C%201.19.0-green.svg)](https://github.com/SillyTavern/SillyTavern)
+[![SillyTavern](https://img.shields.io/badge/SillyTavern-1.14.0%2B-green.svg)](https://github.com/SillyTavern/SillyTavern)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://github.com/CyrilPeng/Novel-Auto-Generator/blob/main/LICENSE)
 
 **SillyTavern 扩展插件 — AI 自动续写小说 + TXT 转世界书**
@@ -234,7 +234,7 @@ novel-auto-generator/
 
 ## 1.9.0 升级说明
 
-已验收 SillyTavern 1.13.2、1.19.0，Edge 和 Firefox；请通过 localhost 或 HTTPS 使用任务功能（需要 Web Locks）。更新前先导出任务和世界书。新版本保留完成成果、迁移前备份和待确认续写状态；设置/任务导出不含 API 密钥，导入后按需重新填写。凭据仍存放于本地浏览器明文存储。
+最低需要 SillyTavern 1.14.0（角色图片库用到 1.14 才有的发图接口，1.13 及以下插件无法加载），已验收 1.19.0，Edge 和 Firefox；请通过 localhost 或 HTTPS 使用任务功能（需要 Web Locks）。更新前先导出任务和世界书。新版本保留完成成果、迁移前备份和待确认续写状态；设置/任务导出不含 API 密钥，导入后按需重新填写。凭据仍存放于本地浏览器明文存储。
 
 人工修改在章节重生成后保留；单独重 Roll 某条目会明确替换该条目的人工覆盖。停止续写后，酒馆已发出的生成可能继续完成；原聊天存在待确认发送时，不会向新聊天自动重发。
 

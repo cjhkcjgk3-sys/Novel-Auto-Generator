@@ -111,6 +111,24 @@ it('does not ask again for abandoned retry pages that still name a current role'
     expect(confirm).not.toHaveBeenCalled();
 });
 
+it('does not ask again right after the user confirmed a restart', async () => {
+    const f = fixture();
+    const confirm = vi.fn(async () => false);
+    f.context.Popup = { show: { confirm } };
+    f.context.chat[2].swipes.push('上一批留下的角色卡');
+    f.context.chat[2].swipe_info.push({});
+    f.batch.restartReviewed = true;
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+    // The reviewed pages are remembered; a new unknown page asks again.
+    delete f.batch.restartReviewed;
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(true);
+    f.context.chat[2].swipes.push('又一张来历不明的角色卡');
+    f.context.chat[2].swipe_info.push({});
+    expect(await f.host.confirmUnidentifiedRolePages(f.batch)).toBe(false);
+    expect(confirm).toHaveBeenCalledOnce();
+});
+
 it('does not ask twice for the same reviewed pages', async () => {
     const f = fixture();
     const confirm = vi.fn(async () => true);

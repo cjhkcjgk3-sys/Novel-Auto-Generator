@@ -1155,6 +1155,11 @@ export function createSillyTavernHost({
             const signature = unidentifiedRolePageSignature(batch, message);
             // The user already reviewed exactly these pages; do not gate every resume on them again.
             if (signature && batch.unidentifiedSignature === signature) return true;
+            // “从头生成” was just confirmed and said existing pages are kept: do not ask a second time.
+            if (batch.restartReviewed) {
+                batch.unidentifiedSignature = signature;
+                return true;
+            }
             if (typeof getContext()?.Popup?.show?.confirm !== 'function')
                 throw new Error(`有 ${count} 条备选回复无法识别角色名称，请先核对后再继续`);
             const confirmed = !!(await getContext().Popup.show.confirm(

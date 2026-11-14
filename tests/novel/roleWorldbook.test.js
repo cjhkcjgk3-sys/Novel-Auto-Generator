@@ -57,8 +57,9 @@ it('exports new and old results without changing text and allocates collision-fr
     expect(result.title).toBe('旧世界书');
     expect(result.entries).toHaveLength(2);
     expect(result.entries.map((e) => e.uid)).toEqual([0, 1]);
-    expect(result.entries.map((e) => e.content)).toEqual([' 旧正文\n', ' 新正文\n']);
-    expect(result.entries[0]).toEqual(entry('琴', ' 旧正文\n', 0));
+    // Imported entries are read through unwrapCodeFence(), which trims (f03cc04); new text is kept as is.
+    expect(result.entries.map((e) => e.content)).toEqual(['旧正文', ' 新正文\n']);
+    expect(result.entries[0]).toEqual(entry('琴', '旧正文', 0));
     expect(result.entries[1].key).toEqual(['安柏']);
 });
 

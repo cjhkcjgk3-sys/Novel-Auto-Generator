@@ -121,7 +121,20 @@ export function createRoleImageIndex(library) {
     // games listed in a mixed folder's 作品别名, are compared.
     const ownWork = compact(library?.workName || (Array.isArray(library?.workNames) ? library.workNames[0] : ''));
     const neutralWorks = new Set(ownWork ? [ownWork] : []);
-    const index = { exact: new Map(), role: new Map(), workKeys, neutralWorks, itemWorks: new Map(), cache: new Map() };
+    // Names declared as one work (`最终幻想7=最终幻想7重制版`); anything else must be spelled the same.
+    const workGroup = new Map();
+    (Array.isArray(library?.workGroups) ? library.workGroups : []).forEach((group, id) => {
+        for (const name of Array.isArray(group) ? group : []) if (compact(name)) workGroup.set(compact(name), id);
+    });
+    const index = {
+        exact: new Map(),
+        role: new Map(),
+        workKeys,
+        neutralWorks,
+        workGroup,
+        itemWorks: new Map(),
+        cache: new Map(),
+    };
     if (!Array.isArray(library?.items)) return index;
     const items = library.items.filter((item) => item?.path);
     const roleAliases = new Map();
@@ -163,9 +176,14 @@ function cachedIndex(library) {
     return index;
 }
 
-/** Two work names are the same work when equal or one extends the other (`尼尔` / `尼尔：机械纪元`). */
-function isSameWork(a, b) {
-    return a === b || a.startsWith(b) || b.startsWith(a);
+/**
+ * Same work only when the compact names are equal or the 清单 declares them as one work. A shared
+ * prefix is not enough: `最终幻想1` and `最终幻想10` are different works.
+ */
+function isSameWork(a, b, index) {
+    if (a === b) return true;
+    const group = index.workGroup?.get(a);
+    return group != null && group === index.workGroup.get(b);
 }
 
 /** Drop candidates whose file name carries a different work name than the roster name. */
@@ -174,7 +192,7 @@ function filterSameWork(matches, work, index) {
     const kept = new Map();
     for (const [key, item] of matches) {
         const works = index.itemWorks.get(item.path);
-        if (!works || works.some((itemWork) => isSameWork(itemWork, work))) kept.set(key, item);
+        if (!works || works.some((itemWork) => isSameWork(itemWork, work, index))) kept.set(key, item);
     }
     return kept;
 }
@@ -306,18 +324,36 @@ function parseAliases(value) {
     return uniqueStrings(String(value || '').split(/[、，,/;；]+/));
 }
 
-/** Work name from `# X角色图片清单`, `作品别名：` or the folder name. */
+const WORK_GROUP_SEPARATOR = /[=＝]/;
+
+function workAliasEntries(text) {
+    return parseAliases(String(text || '').match(/^\s*作品别名[:：]\s*(.*?)\s*$/m)?.[1] || '');
+}
+
+/**
+ * Work name from `# X角色图片清单`, `作品别名：` or the folder name. In a mixed folder,
+ * `作品别名：最终幻想7=最终幻想7重制版、最终幻想8` lists 最终幻想7 and its remake as one work.
+ */
 export function parseChecklistWorkNames(text, folderName = '') {
     const source = String(text || '');
     const title = source.match(/^\s*#\s+(.+?)\s*$/m)?.[1] || '';
     const titleName = title.replace(/\s*(?:角色)?(?:图片)?(?:清单|名单|目录)\s*$/u, '').trim();
-    const aliasesLine = source.match(/^\s*作品别名[:：]\s*(.*?)\s*$/m)?.[1] || '';
-    const aliases = parseAliases(aliasesLine);
+    const aliases = workAliasEntries(source).flatMap((entry) => entry.split(WORK_GROUP_SEPARATOR));
     return uniqueStrings([titleName, folderName, ...aliases]);
 }
 
+/** Groups of names declared as one work with `=` in `作品别名：`. */
+export function parseChecklistWorkGroups(text) {
+    return workAliasEntries(text)
+        .filter((entry) => WORK_GROUP_SEPARATOR.test(entry))
+        .map((entry) => uniqueStrings(entry.split(WORK_GROUP_SEPARATOR)))
+        .filter((group) => group.length > 1);
+}
+
+/** One row per image path: an image listed twice (e.g. also under 「## 皮肤」) is imported once. */
 function parseChecklist(text, directory) {
     const rows = [];
+    const byPath = new Map();
     for (const line of String(text).split(/\r?\n/)) {
         const match = line.match(/^\s*-\s*\[[ xX]\]\s*\[([^\]]+)\]\((<[^>]+>|[^)]*)\)(.*)$/);
         if (!match) continue;
@@ -329,7 +365,14 @@ function parseChecklist(text, directory) {
         const extension = path.split('.').at(-1)?.toLowerCase();
         if (!EXTENSIONS.has(extension)) continue;
         const aliasText = match[3].match(/(?:^|\s)别名[:：]\s*([^;；]*?)(?:\s+备注[:：].*)?\s*$/)?.[1] || '';
-        rows.push({
+        const existing = byPath.get(path);
+        if (existing) {
+            existing.aliases = uniqueStrings([...existing.aliases, ...parseAliases(aliasText), name]).filter(
+                (alias) => alias !== existing.name,
+            );
+            continue;
+        }
+        const row = {
             name,
             aliases: parseAliases(aliasText),
             path,
@@ -337,7 +380,9 @@ function parseChecklist(text, directory) {
                 .split('/')
                 .at(-1)
                 .replace(/\.[^.]+$/, ''),
-        });
+        };
+        byPath.set(path, row);
+        rows.push(row);
     }
     return rows;
 }
@@ -615,7 +660,14 @@ export async function importRoleImageZip(
             throw new Error(saveFailures ? '酒馆未能保存图片，请检查酒馆图片接口后重试' : 'ZIP 中没有可读取的角色图片');
         }
         return {
-            library: { workName, workNames, items, noImageNames: [], checklist: parseChecklistRoles(manifest) },
+            library: {
+                workName,
+                workNames,
+                workGroups: parseChecklistWorkGroups(manifest),
+                items,
+                noImageNames: [],
+                checklist: parseChecklistRoles(manifest),
+            },
             imported: items.length,
             skipped,
         };

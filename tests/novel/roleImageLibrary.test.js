@@ -10,6 +10,7 @@ import {
     listChecklistRoles,
     matchRoleImage,
     parseChecklistRoles,
+    parseChecklistWorkGroups,
     parseChecklistWorkNames,
     parseRoleImageName,
     setRoleImageDisabled,
@@ -320,6 +321,27 @@ describe('importRoleImageZip', () => {
         expect(matchRoleImage('安比（绝区零）改', result.library).item?.name).toBe('安比（改）');
     });
 
+    it('imports an image listed twice only once and keeps both names as one image', async () => {
+        const host = createHost();
+        const manifest = `# 绝区零角色图片清单\n\n- [x] [安比](<安比.png>)\n- [x] [安比（改）](<安比（改）.png>)\n- [x] [安比](<安比.png>)\n\n## 皮肤\n\n- [x] [安比（改）](<安比（改）.png>)\n- [x] [安比·改造](<安比（改）.png>)\n`;
+        const result = await importRoleImageZip(
+            zipFile([
+                { name: '绝区零/00-清单.md', data: manifest },
+                { name: '绝区零/安比.png', data: PNG },
+                { name: '绝区零/安比（改）.png', data: PNG },
+            ]),
+            host,
+            options,
+        );
+        expect(result.imported).toBe(2);
+        expect(host.uploads).toHaveLength(4);
+        expect(result.library.items.map((entry) => entry.name)).toEqual(['安比', '安比（改）']);
+        expect(matchRoleImage('安比（改）', result.library).item?.name).toBe('安比（改）');
+        expect(matchRoleImage('安比·改造', result.library).item?.name).toBe('安比（改）');
+        expect(result.library.checklist).toEqual({ roles: ['安比', '安比（改）'], skins: ['安比·改造'] });
+        expect(listChecklistRoles(result.library).roles.map((row) => row.name)).toEqual(['安比', '安比（改）']);
+    });
+
     it('accepts one and two folder levels', async () => {
         for (const prefix of ['绝区零/', 'images/绝区零/']) {
             const result = await importRoleImageZip(zipFile(zzzEntries(prefix)), createHost(), options);
@@ -535,6 +557,10 @@ describe('role image matching in mixed-work folders', () => {
     const mixed = {
         workName: '主机与PC游戏',
         workNames: ['主机与PC游戏', '最终幻想7', '最终幻想7重制版', '最终幻想8', '尼尔：机械纪元', '尼尔'],
+        workGroups: [
+            ['最终幻想7', '最终幻想7重制版'],
+            ['尼尔：机械纪元', '尼尔'],
+        ],
         items: [item('最终幻想7蒂法'), item('最终幻想7蒂法（女仆装）'), item('尼尔：机械纪元2B')],
     };
     const match = (name, lib = mixed) => matchRoleImage(name, lib, createRoleImageIndex(lib));
@@ -557,6 +583,38 @@ describe('role image matching in mixed-work folders', () => {
         expect(match('蒂法（女仆装）').item?.name).toBe('最终幻想7蒂法（女仆装）');
         expect(match('尼尔2B').item?.name).toBe('尼尔：机械纪元2B');
         expect(match('主机与PC游戏蒂法').item?.name).toBe('最终幻想7蒂法');
+    });
+
+    it('treats prefix-sharing names as different works unless the 清单 groups them', () => {
+        const lib = {
+            workName: '主机与PC游戏',
+            workNames: ['主机与PC游戏', '最终幻想1', '最终幻想10', '最终幻想7', '最终幻想7重制版'],
+            items: [item('最终幻想1光之战士'), item('最终幻想7蒂法')],
+        };
+        expect(match('最终幻想10光之战士', lib).reason).toContain('作品名不同');
+        expect(match('最终幻想1光之战士', lib).item?.name).toBe('最终幻想1光之战士');
+        expect(match('最终幻想7重制版蒂法', lib).reason).toContain('作品名不同');
+    });
+
+    it('reads 作品别名 groups written with =', () => {
+        const text = '# 主机与PC游戏角色图片清单\n作品别名：主机与PC游戏、最终幻想7=FF7＝最终幻想7重制版、最终幻想8\n';
+        expect(parseChecklistWorkNames(text, '主机与PC游戏')).toEqual([
+            '主机与PC游戏',
+            '最终幻想7',
+            'FF7',
+            '最终幻想7重制版',
+            '最终幻想8',
+        ]);
+        expect(parseChecklistWorkGroups(text)).toEqual([['最终幻想7', 'FF7', '最终幻想7重制版']]);
+        const lib = {
+            workName: '主机与PC游戏',
+            workNames: parseChecklistWorkNames(text),
+            workGroups: parseChecklistWorkGroups(text),
+            items: [item('最终幻想7蒂法')],
+        };
+        expect(match('FF7蒂法', lib).item?.name).toBe('最终幻想7蒂法');
+        expect(match('蒂法（最终幻想7重制版）', lib).item?.name).toBe('最终幻想7蒂法');
+        expect(match('最终幻想8蒂法', lib).item).toBeNull();
     });
 
     it('uses the game name to pick between same-named roles of different games', () => {
