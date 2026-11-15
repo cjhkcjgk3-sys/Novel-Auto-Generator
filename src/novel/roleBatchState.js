@@ -1,5 +1,5 @@
 import { newIdentity } from '../../txtToWorldbook/core/chunkIdentity.js';
-import { createRoleNameMatcher } from './roleName.js';
+import { createRoleNameMatcher, parseWithWorkKeys, workKeysOf } from './roleName.js';
 
 export const roleComplete = (item) =>
     item?.manualStatus === 'complete' || (item?.manualStatus !== 'failed' && !!item?.processed && !item.failed);
@@ -91,16 +91,48 @@ export function normalizeRoleArchive(archive) {
     return names;
 }
 
-export function mergeRoleArchive(archive, names) {
+export function mergeRoleArchive(archive, names, workNames = []) {
     const merged = normalizeRoleArchive(archive);
     const known = new Set(merged);
+    // 收录时也要按「同一个角色」去重：名录里有「南达科他」，再完成一次
+    // 「碧蓝航线·南达科他」不该多出一条。以前这里只比字符串。
+    const matcher = createRoleNameMatcher(merged, workNames);
     for (const value of names || []) {
         const name = String(value || '').trim();
         if (!name || known.has(name)) continue;
+        if (merged.length && matcher.has(name)) continue;
         known.add(name);
         merged.push(name);
     }
     return merged;
+}
+
+/**
+ * 把名录里已经重复的不同写法合并成一个（例如「碧蓝航线·南达科他」与「南达科他」）。
+ *
+ * 只在「同一个解析键下、恰好有一个带作品名的写法 + 一个不带作品名的写法」时合并，
+ * 保留带作品名的那条（信息更全）。同一角色名对应多个作品时不动，避免把
+ * 「最终幻想7蒂法」和「最终幻想8蒂法」误并。
+ */
+export function dedupeRoleArchive(archive, workNames = []) {
+    const names = normalizeRoleArchive(archive);
+    const workKeys = workKeysOf(workNames);
+    const groups = new Map();
+    names.forEach((name, index) => {
+        const parsed = parseWithWorkKeys(name, workKeys);
+        if (!parsed.key) return;
+        if (!groups.has(parsed.key)) groups.set(parsed.key, []);
+        groups.get(parsed.key).push({ index, work: parsed.work });
+    });
+    const drop = new Set();
+    for (const entries of groups.values()) {
+        if (entries.length < 2) continue;
+        const bare = entries.filter((entry) => !entry.work);
+        const works = new Set(entries.filter((entry) => entry.work).map((entry) => entry.work));
+        if (bare.length !== 1 || works.size !== 1) continue;
+        for (const entry of bare) drop.add(entry.index);
+    }
+    return drop.size ? names.filter((_, index) => !drop.has(index)) : names;
 }
 
 export function removeRoleArchiveName(archive, name) {

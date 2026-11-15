@@ -3,6 +3,7 @@ import { createRoleBatchRunner, parseRoleNames } from '../../src/novel/roleBatch
 import {
     applyArchiveSkips,
     countUnidentifiedRolePages,
+    dedupeRoleArchive,
     duplicateRoleNames,
     mergeRoleArchive,
     normalizeRoleArchive,
@@ -151,6 +152,29 @@ it('normalizes the finished-role archive by trimmed unique names', () => {
     expect(mergeRoleArchive(['琴'], ['安柏', ' 琴 ', ''])).toEqual(['琴', '安柏']);
     expect(removeRoleArchiveName(['琴', '安柏'], ' 琴 ')).toEqual(['安柏']);
     expect(removeRoleArchiveName(undefined, '琴')).toEqual([]);
+});
+
+it('stores a role once even when it is written with and without the work name', () => {
+    // 收录时也按「同一个角色」判断，避免名录里出现两条
+    expect(mergeRoleArchive(['南达科他'], ['碧蓝航线·南达科他'], ['碧蓝航线'])).toEqual(['南达科他']);
+    expect(mergeRoleArchive(['碧蓝航线·南达科他'], ['南达科他'], ['碧蓝航线'])).toEqual(['碧蓝航线·南达科他']);
+    // 不同作品里的同名角色仍然各记一条
+    expect(mergeRoleArchive(['最终幻想7蒂法'], ['最终幻想8蒂法'], ['最终幻想7', '最终幻想8'])).toEqual([
+        '最终幻想7蒂法',
+        '最终幻想8蒂法',
+    ]);
+});
+
+it('collapses an existing duplicate archive entry and keeps the name with the work prefix', () => {
+    const archive = ['琴', '南达科他', '安柏', '碧蓝航线·南达科他'];
+    expect(dedupeRoleArchive(archive, ['碧蓝航线'])).toEqual(['琴', '安柏', '碧蓝航线·南达科他']);
+    // 没有作品名清单时判断不了前缀，保持原样
+    expect(dedupeRoleArchive(archive, [])).toEqual(archive);
+    // 同一角色名对应多个作品时不合并
+    expect(dedupeRoleArchive(['最终幻想7蒂法', '最终幻想8蒂法'], ['最终幻想7', '最终幻想8'])).toEqual([
+        '最终幻想7蒂法',
+        '最终幻想8蒂法',
+    ]);
 });
 
 it('marks archived names as finished and releases them once deleted from the archive', () => {

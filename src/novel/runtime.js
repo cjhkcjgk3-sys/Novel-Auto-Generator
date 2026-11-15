@@ -5,6 +5,7 @@ import { createNovelRecoveryStore, createRoleBatchRecoveryStore } from './recove
 import {
     countUnidentifiedRolePages,
     duplicateRoleNames,
+    dedupeRoleArchive,
     mergeRoleArchive,
     normalizeRoleArchive,
     removeRoleArchiveName,
@@ -104,7 +105,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.13';
+    const pluginVersion = '1.15.14';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -633,7 +634,7 @@ export function initNovelUI(host) {
         },
         onRoleComplete: (name) => {
             // onChange/saveSettings follows every checkpoint, so this is persisted with the batch.
-            settings.roleArchive = mergeRoleArchive(settings.roleArchive, [name]);
+            settings.roleArchive = mergeRoleArchive(settings.roleArchive, [name], settings.roleImageLibrary?.workNames);
         },
     });
     let imageSkipNoticeBatch = null;
@@ -1203,7 +1204,7 @@ export function initNovelUI(host) {
             .restoreLegacyVisibility()
             .catch((error) => recordError(error, { phase: 'restore-legacy-visibility' }));
         settings.panelCollapsed = Object.assign({}, defaultSettings.panelCollapsed, settings.panelCollapsed || {});
-        settings.roleArchive = normalizeRoleArchive(settings.roleArchive);
+        settings.roleArchive = dedupeRoleArchive(settings.roleArchive, settings.roleImageLibrary?.workNames);
         settings.isRunning = false;
         settings.isPaused = false;
         try {
@@ -1965,7 +1966,7 @@ export function initNovelUI(host) {
             const names = parseRoleNames(String($('#nag-archive-input').val() || ''));
             if (!names.length) return toastr.info('请先输入角色名，每行一个');
             const before = normalizeRoleArchive(settings.roleArchive).length;
-            const merged = mergeRoleArchive(settings.roleArchive, names);
+            const merged = mergeRoleArchive(settings.roleArchive, names, settings.roleImageLibrary?.workNames);
             $('#nag-archive-input').val('');
             if (merged.length === before) return toastr.info('这些名字都已在名录中');
             saveRoleArchive(merged, `已收录 ${merged.length - before} 个名字`);
@@ -1978,7 +1979,7 @@ export function initNovelUI(host) {
                 .map((item) => item.name);
             if (!names.length) return toastr.info('当前没有已完成的角色可收录');
             const before = normalizeRoleArchive(settings.roleArchive).length;
-            const merged = mergeRoleArchive(settings.roleArchive, names);
+            const merged = mergeRoleArchive(settings.roleArchive, names, settings.roleImageLibrary?.workNames);
             if (merged.length === before) return toastr.info('已完成角色都已在名录中');
             saveRoleArchive(merged, `已收录 ${merged.length - before} 个已完成角色`);
         });
