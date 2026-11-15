@@ -493,6 +493,47 @@ describe('importRoleImageZip', () => {
     });
 });
 
+describe('separate role and skin manifests', () => {
+    const roles = '# 示例角色图片清单\n\n- [ ] 安比\n- [ ] 妮可';
+    const skins = '# 示例皮肤清单\n\n## 安比\n- [x] [安比（泳装）](<安比（泳装）.png>)\n## 妮可\n- [ ] 妮可（节日）';
+    const files = [
+        { name: '示例/00-角色清单.md', data: roles },
+        { name: '示例/01-皮肤清单.md', data: skins },
+        { name: '示例/安比（泳装）.png', data: PNG },
+        { name: '示例/00-清单.md', data: '# 旧角色图片清单\n\n- [ ] 不应读取' },
+    ];
+
+    it('prefers the new pair, preserves skin images and never substitutes them for a missing base', async () => {
+        const result = await importRoleImageZip(zipFile(files), createHost(), { makeThumbnail: fakeThumbnail });
+        expect(result.library.checklist).toEqual({ roles: ['安比', '妮可'], skins: ['安比（泳装）', '妮可（节日）'] });
+        expect(matchRoleImage('安比', result.library).item).toBeNull();
+        expect(matchRoleImage('安比（泳装）', result.library).item?.name).toBe('安比（泳装）');
+        expect(result.imported).toBe(1);
+    });
+
+    it('does not match a skin whose alias collides with a missing base role', () => {
+        const lib = {
+            workNames: ['示例'],
+            checklist: { roles: ['安比'], skins: ['安比（泳装）'] },
+            items: [{ name: '安比（泳装）', aliases: ['安比'], fileName: '安比（泳装）', path: 'skin.webp' }],
+        };
+        expect(matchRoleImage('安比', lib).item).toBeNull();
+        expect(matchRoleImage('安比（泳装）', lib).item?.name).toBe('安比（泳装）');
+    });
+
+    it('imports a new roles-only manifest', async () => {
+        const result = await importRoleImageZip(
+            zipFile([
+                { name: '00-角色清单.md', data: '# 示例角色图片清单\n- [x] [安比](<安比.png>)' },
+                { name: '安比.png', data: PNG },
+            ]),
+            createHost(),
+            { makeThumbnail: fakeThumbnail },
+        );
+        expect(result.library.checklist).toEqual({ roles: ['安比'], skins: [] });
+    });
+});
+
 describe('checklist roles → roster', () => {
     const options = { makeThumbnail: fakeThumbnail };
     const MANIFEST = `# 碧蓝航线角色图片清单

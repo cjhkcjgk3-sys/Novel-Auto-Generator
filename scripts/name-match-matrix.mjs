@@ -12,9 +12,14 @@ const WORKS = ['绝区零', '明日方舟', '星穹铁道', '原神', 'FGO', '�
 
 function loadWork(work) {
     for (const root of roots) {
-        const file = path.join(root, 'images', work, '00-清单.md');
+        const dir = path.join(root, 'images', work);
+        const newFile = path.join(dir, '00-角色清单.md');
+        const file = fs.existsSync(newFile) ? newFile : path.join(dir, '00-清单.md');
         if (!fs.existsSync(file)) continue;
-        const text = fs.readFileSync(file, 'utf8');
+        const skinFile = path.join(dir, '01-皮肤清单.md');
+        const text =
+            fs.readFileSync(file, 'utf8') +
+            (file === newFile && fs.existsSync(skinFile) ? `\n${fs.readFileSync(skinFile, 'utf8')}` : '');
         const items = [];
         for (const line of text.split(/\r?\n/)) {
             const m = line.match(/^\s*-\s*\[[ xX]\]\s*\[([^\]]+)\]\((<[^>]+>|[^)]*)\)(.*)$/);

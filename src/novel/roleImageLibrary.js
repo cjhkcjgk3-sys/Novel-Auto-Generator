@@ -19,6 +19,8 @@ const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_ENTRIES = 50000;
 const MANIFEST_NAME = '00-清单.md';
+const ROLE_MANIFEST_NAME = '00-角色清单.md';
+const SKIN_MANIFEST_NAME = '01-皮肤清单.md';
 export const THUMBNAIL_SIZE = 128;
 const EXTENSIONS = new Map([
     ['jpg', 'jpg'],
@@ -57,10 +59,18 @@ export function createRoleImageIndex(library) {
         neutralWorks,
         workGroup,
         itemWorks: new Map(),
+        roleKeys: new Set(
+            (Array.isArray(library?.checklist?.roles) ? library.checklist.roles : []).map(
+                (name) => parseWithWorkKeys(name, workKeys).key,
+            ),
+        ),
+        skinPaths: new Set(),
         cache: new Map(),
     };
     if (!Array.isArray(library?.items)) return index;
     const items = library.items.filter((item) => item?.path);
+    const skinNames = new Set((Array.isArray(library?.checklist?.skins) ? library.checklist.skins : []).map(compact));
+    for (const item of items) if (skinNames.has(compact(item.name))) index.skinPaths.add(item.path);
     const roleAliases = new Map();
     const parsedItems = items.map((item) => {
         const parsed = itemNames(item).map((name) => parseWithWorkKeys(name, workKeys));
@@ -141,7 +151,11 @@ export function matchRoleImage(name, library, index = cachedIndex(library)) {
 function resolveRoleImage(name, index) {
     const exactKey = compact(name);
     if (!exactKey) return { status: 'none', item: null, reason: '角色名为空' };
-    const exact = index.exact.get(exactKey);
+    const parsed = parseWithWorkKeys(name, index.workKeys);
+    const excludeSkin = index.roleKeys?.has(parsed.key);
+    const withoutSkins = (matches) =>
+        excludeSkin && matches ? new Map([...matches].filter(([path]) => !index.skinPaths.has(path))) : matches;
+    const exact = withoutSkins(index.exact.get(exactKey));
     if (exact?.size === 1) return { status: 'matched', tier: 'exact', item: exact.values().next().value, reason: '' };
     if (exact?.size > 1) {
         const names = candidateNames(exact);
@@ -152,8 +166,7 @@ function resolveRoleImage(name, index) {
             reason: `有 ${names.length} 张图片同名（${names.join('、')}），无法确定用哪张`,
         };
     }
-    const parsed = parseWithWorkKeys(name, index.workKeys);
-    const allRoleMatches = parsed.key ? index.role.get(parsed.key) : null;
+    const allRoleMatches = parsed.key ? withoutSkins(index.role.get(parsed.key)) : null;
     const roleMatches = filterSameWork(allRoleMatches, parsed.work, index);
     if (allRoleMatches?.size && !roleMatches?.size)
         return {
@@ -532,19 +545,29 @@ export async function importRoleImageZip(
         const path = normalizeZipPath(entry.name);
         if (path) files.set(path, entry);
     }
-    const manifests = [...files.keys()].filter((path) => path.split('/').at(-1) === MANIFEST_NAME);
-    if (!manifests.length) throw new Error('ZIP 里没有找到 00-清单.md');
-    if (manifests.length > 1) throw new Error('ZIP 只能包含一个作品（发现多个 00-清单.md）');
-    const manifestPath = manifests[0];
+    const manifestPaths = [...files.keys()].filter((path) =>
+        [MANIFEST_NAME, ROLE_MANIFEST_NAME, SKIN_MANIFEST_NAME].includes(path.split('/').at(-1)),
+    );
+    const rolePaths = manifestPaths.filter((path) => path.split('/').at(-1) === ROLE_MANIFEST_NAME);
+    const legacyPaths = manifestPaths.filter((path) => path.split('/').at(-1) === MANIFEST_NAME);
+    const candidates = rolePaths.length ? rolePaths : legacyPaths;
+    if (!candidates.length) throw new Error('ZIP 里没有找到 00-角色清单.md 或 00-清单.md');
+    if (candidates.length > 1) throw new Error('ZIP 只能包含一个作品（发现多个角色清单）');
+    const manifestPath = candidates[0];
     const directory = manifestPath.split('/').slice(0, -1).join('/');
-    const manifestBlob = await archive.readEntry(files.get(manifestPath), { maxBytes: MAX_MANIFEST_BYTES });
-    const manifest = await manifestBlob.text();
+    if (manifestPaths.some((path) => path.split('/').slice(0, -1).join('/') !== directory))
+        throw new Error('ZIP 只能包含一个作品（发现多个目录的清单）');
+    const readManifest = async (path) =>
+        (await archive.readEntry(files.get(path), { maxBytes: MAX_MANIFEST_BYTES })).text();
+    const manifest = await readManifest(manifestPath);
+    const skinPath = directory ? `${directory}/${SKIN_MANIFEST_NAME}` : SKIN_MANIFEST_NAME;
+    const skinManifest = rolePaths.length && files.has(skinPath) ? await readManifest(skinPath) : '';
     const folderName = directory.split('/').at(-1) || '';
     const zipName = file.name.replace(/\.zip$/i, '').trim();
     const workNames = parseChecklistWorkNames(manifest, folderName);
     const workName = workNames[0] || zipName;
     if (!workNames.length && workName) workNames.push(workName);
-    const rows = parseChecklist(manifest, directory);
+    const rows = parseChecklist(`${manifest}\n${skinManifest}`, directory);
     if (!rows.length) throw new Error('清单里没有可导入的角色图片');
 
     const items = [];
@@ -609,7 +632,18 @@ export async function importRoleImageZip(
                 workGroups: parseChecklistWorkGroups(manifest),
                 items,
                 noImageNames: [],
-                checklist: parseChecklistRoles(manifest),
+                checklist: (() => {
+                    const parsed = parseChecklistRoles(manifest);
+                    if (!rolePaths.length) return parsed;
+                    const skinParsed = parseChecklistRoles(skinManifest);
+                    const roleNames = new Set(parsed.roles);
+                    return {
+                        roles: parsed.roles,
+                        skins: uniqueStrings([...skinParsed.roles, ...skinParsed.skins]).filter(
+                            (name) => !roleNames.has(name),
+                        ),
+                    };
+                })(),
             },
             imported: items.length,
             skipped,
