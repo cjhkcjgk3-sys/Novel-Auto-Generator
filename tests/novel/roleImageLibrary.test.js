@@ -7,6 +7,7 @@ import {
     getRoleImageForRequest,
     hasChecklistRoles,
     importRoleImageZip,
+    isRoleImageDisabled,
     listChecklistRoles,
     matchRoleImage,
     parseChecklistRoles,
@@ -138,6 +139,27 @@ function library(items, workNames = ['绝区零', 'ZZZ', 'Zenless Zone Zero']) {
         noImageNames: [],
     };
 }
+
+describe('no-image flag identity', () => {
+    const library = () => ({ workName: '碧蓝航线', workNames: ['碧蓝航线'], items: [], noImageNames: [] });
+
+    it('is shared across spellings of the same role', () => {
+        const marked = setRoleImageDisabled('南达科他', true, library());
+        expect(isRoleImageDisabled('碧蓝航线·南达科他', marked)).toBe(true);
+        expect(
+            isRoleImageDisabled('碧蓝航线·南达科他', setRoleImageDisabled('碧蓝航线·南达科他', true, library())),
+        ).toBe(true);
+        // 不同的形态不算同一个角色
+        expect(isRoleImageDisabled('南达科他II', marked)).toBe(false);
+    });
+
+    it('can be released again and stays exact for other roles', () => {
+        const marked = setRoleImageDisabled('南达科他', true, library());
+        const released = setRoleImageDisabled('碧蓝航线·南达科他', false, marked);
+        expect(isRoleImageDisabled('南达科他', released)).toBe(true);
+        expect(isRoleImageDisabled('安比', marked)).toBe(false);
+    });
+});
 
 describe('role image name matching', () => {
     const zzz = library([

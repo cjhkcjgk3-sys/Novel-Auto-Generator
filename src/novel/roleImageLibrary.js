@@ -2,6 +2,7 @@ import { parseRoleNames } from './roleBatchState.js';
 import { canReadZipOnDemand, openZip, openZipWithJSZip } from './zipReader.js';
 import {
     compact,
+    createRoleNameMatcher,
     normalizeRoleImageName,
     parseRoleImageName,
     parseWithWorkKeys,
@@ -199,9 +200,28 @@ export function findRoleImageMatch(name, library, index) {
     return matchRoleImage(name, library, index).item;
 }
 
+// 「不用图」标记也要按同一套角色身份比较：给 `南达科他` 设了不用图，
+// 再来 `碧蓝航线·南达科他` 时不该又把图发出去。以前这里只比归一化字符串。
+const disabledMatchers = new WeakMap();
+
+function disabledMatcherFor(library) {
+    const names = Array.isArray(library?.noImageNames) ? library.noImageNames : null;
+    if (!names?.length) return null;
+    const workKey = Array.isArray(library?.workNames) ? library.workNames.join('\u0000') : '';
+    const cached = disabledMatchers.get(names);
+    if (cached?.workKey === workKey) return cached.matcher;
+    const matcher = createRoleNameMatcher(names, library?.workNames);
+    disabledMatchers.set(names, { workKey, matcher });
+    return matcher;
+}
+
 export function isRoleImageDisabled(name, library) {
     const key = normalizeRoleImageName(name);
-    return !!key && Array.isArray(library?.noImageNames) && library.noImageNames.includes(key);
+    if (!key) return false;
+    const names = Array.isArray(library?.noImageNames) ? library.noImageNames : null;
+    if (!names?.length) return false;
+    if (names.includes(key)) return true;
+    return !!disabledMatcherFor(library)?.has(name);
 }
 
 export function setRoleImageDisabled(name, disabled, library) {

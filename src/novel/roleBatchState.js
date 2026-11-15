@@ -127,10 +127,22 @@ export function dedupeRoleArchive(archive, workNames = []) {
     const drop = new Set();
     for (const entries of groups.values()) {
         if (entries.length < 2) continue;
-        const bare = entries.filter((entry) => !entry.work);
-        const works = new Set(entries.filter((entry) => entry.work).map((entry) => entry.work));
-        if (bare.length !== 1 || works.size !== 1) continue;
-        for (const entry of bare) drop.add(entry.index);
+        // 同一作品（含都没写作品名）下的重复写法：只留第一条，
+        // 例如 `长门·META` 与 `长门 META` 只差标点
+        const seenWorks = new Set();
+        const kept = [];
+        for (const entry of entries) {
+            if (seenWorks.has(entry.work)) {
+                drop.add(entry.index);
+                continue;
+            }
+            seenWorks.add(entry.work);
+            kept.push(entry);
+        }
+        // 再处理「一个带作品名 + 一个不带」：保留带作品名的那条（信息更全）
+        const bare = kept.filter((entry) => !entry.work);
+        const works = new Set(kept.filter((entry) => entry.work).map((entry) => entry.work));
+        if (bare.length === 1 && works.size === 1) drop.add(bare[0].index);
     }
     return drop.size ? names.filter((_, index) => !drop.has(index)) : names;
 }

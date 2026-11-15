@@ -1,6 +1,6 @@
 {
   "name": "novel-auto-generator",
-  "version": "1.15.14",
+  "version": "1.15.15",
   "private": true,
   "type": "module",
   "description": "SillyTavern 扩展插件 — AI 自动续写小说 + TXT 转世界书",
@@ -14,7 +14,8 @@
     "format:check": "prettier --check \"**/*.{js,mjs,json,md,css,yml,yaml}\"",
     "typecheck": "tsc -p tsconfig.json",
     "check:boundaries": "node scripts/check-boundaries.mjs",
-    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run check:boundaries && npm test"
+    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run check:boundaries && npm run check:names && npm test",
+    "check:names": "node scripts/name-consistency.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.23.0",
