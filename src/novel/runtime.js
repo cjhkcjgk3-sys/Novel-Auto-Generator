@@ -105,7 +105,7 @@ export function initNovelUI(host) {
     let generationStats = { startTime: null, chaptersGenerated: 0, totalCharacters: 0, errors: [] };
     let recordedStatErrors = 0;
     let roleSuccessNotices = [];
-    const pluginVersion = '1.15.15';
+    const pluginVersion = '1.15.16';
     function recordError(error, details = {}) {
         if (['ABORTED', 'USER_STOPPED'].includes(error?.code)) return;
         const entries = Array.isArray(settings.errorLog) ? settings.errorLog : [];
@@ -1335,11 +1335,6 @@ export function initNovelUI(host) {
             }
         }
         const roleNames = batch?.names || parseRoleNames(settings.roleNames);
-        const total = batchMode ? roleNames.length : settings.totalChapters;
-        const completed = batchMode ? batch?.items?.filter(roleComplete).length || 0 : settings.currentChapter;
-        const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
-        $('#nag-progress-fill').css('width', `${pct}%`);
-        $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
         const busy = settings.isRunning || fileOperation;
         $('#nag-set-mode, #nag-set-prompt, #nag-set-total').prop('disabled', busy);
         $('#nag-set-total').prop('readOnly', batchMode);
@@ -1355,6 +1350,21 @@ export function initNovelUI(host) {
         if (batchMode) renderChecklistPicker();
         const archiveNames = normalizeRoleArchive(settings.roleArchive);
         const archiveNameMatcher = getArchiveMatcher(archiveNames, imageLibrary?.workNames);
+        // 名录中的角色要等到点「开始／继续」才被标记跳过；在那之前也让它们显示为已完成，
+        // 否则界面上看着像还在排队，实际却不会被生成。
+        const archivedFlags = batchMode
+            ? roleNames.map((name, index) => {
+                  const item = batch?.items?.[index];
+                  return !!item?.archived || (!roleComplete(item) && archiveNameMatcher.has(name));
+              })
+            : [];
+        const total = batchMode ? roleNames.length : settings.totalChapters;
+        const completed = batchMode
+            ? (batch?.items || []).filter((item, index) => roleComplete(item) || archivedFlags[index]).length
+            : settings.currentChapter;
+        const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
+        $('#nag-progress-fill').css('width', `${pct}%`);
+        $('#nag-progress-text').text(`${completed} / ${total} (${pct}%)`);
         renderRoleArchive(archiveNames);
         const repeatedNames = batchMode ? duplicateRoleNames(settings.roleNames) : [];
         $('#nag-role-duplicate-hint')
@@ -1411,8 +1421,13 @@ export function initNovelUI(host) {
                   const item = batch?.items[index] || {};
                   const suffix = item.processing ? ` 第 ${batch.attempt}/3 次尝试` : '';
                   const manual = item.manualStatus ? '（手动）' : '';
-                  const archivedMark =
-                      item.archived || (!roleComplete(item) && archiveNameMatcher.has(name)) ? '（名录）' : '';
+                  const archived = archivedFlags[index] ?? false;
+                  const archivedMark = archived ? '（名录）' : '';
+                  // 开始前就按已完成显示，不再挂着「排队」的沙漏
+                  const statusItem =
+                      archived && !roleComplete(item)
+                          ? { ...item, processed: true, failed: false, processing: false }
+                          : item;
                   // 失败原因以前只存在数据里、界面上看不到，用户只能看到一个 ❌
                   const failureMark = item.error
                       ? ` <span class="nag-role-failure" data-index="${index}" title="${escapeAttribute(item.error)}">⚠</span>`
@@ -1423,7 +1438,7 @@ export function initNovelUI(host) {
                           : '';
                   return {
                       key: `${index}:${name}`,
-                      main: `${roleStatusRenderer.getStatusIcon(item)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}${failureMark}`,
+                      main: `${roleStatusRenderer.getStatusIcon(statusItem)} ${index + 1}. ${escapeHtml(name)}${suffix}${manual}${archivedMark}${failureMark}`,
                       controls,
                       slot: roleImageSlot(name, index, imageLibrary),
                   };
