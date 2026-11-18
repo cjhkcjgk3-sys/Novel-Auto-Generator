@@ -4,7 +4,7 @@
 
 ## 开工前必读：AI 经验仓库
 
-> 本段由 [ai-dev-lessons](https://github.com/cjhkcjgk3-sys/ai-dev-lessons) 统一同步，所有 AI 都要遵守；与下文冲突时以本段为准。
+> 本段由 [ai-dev-lessons](https://github.com/cjhkcjgk3-sys/ai-dev-lessons) 统一同步，所有 AI 都要遵守。**ai-dev-lessons 的 `正式/` 是唯一权威**；本文件其余内容只补充本仓库专属规定，与经验仓库冲突时以经验仓库为准。
 
 1. **先读完 [ai-dev-lessons 的 `正式/`](https://github.com/cjhkcjgk3-sys/ai-dev-lessons/tree/main/正式)**：通用准则、检查清单、工作流程、全部模型专项（不只读自己那份）。可 `git clone`／`git pull` 该仓库，拉不到就看网页版，并在汇报里写明没读到哪些。开工汇报第一句写本次相关的条目编号。
 2. **先查能不能复用**：本仓库已有代码、SillyTavern 自带功能、兄弟插件，汇报里写明查了哪些。
@@ -17,7 +17,7 @@
 
 <!-- ai-dev-lessons:end -->
 
-> **动手之前先读 [开发准则](docs/开发准则.md)**：易用性第一、UI 一致、代码复用、该宽则宽该严则严、按用户意图做。冲突时按准则里的优先级取舍。收工前按准则里的「收尾准则」清理残留、合并推送、核对远端。
+> 通用开发准则已并入 ai-dev-lessons 的 `正式/`（见上），本仓库 [docs/开发准则.md](docs/开发准则.md) 只保留「本仓库专属」规定；冲突时以经验仓库为准。收工前按经验仓库[检查清单](https://github.com/cjhkcjgk3-sys/ai-dev-lessons/blob/main/正式/检查清单.md)「收尾」清理残留、合并推送、核对远端。
 
 这是 SillyTavern（酒馆）扩展“小说自动生成器”。用户主要在手机上使用，默认暗色主题。
 
